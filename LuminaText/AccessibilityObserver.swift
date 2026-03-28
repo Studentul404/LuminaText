@@ -1,4 +1,3 @@
-// File: AccessibilityObserver.swift
 import AppKit
 import ApplicationServices
 
@@ -6,10 +5,8 @@ import ApplicationServices
 
 struct TextContext {
     let textBeforeCursor: String
-    let selectedText:     String
-    let appBundleID:      String
-    let appName:          String
-    let fullText:         String
+    let selectedText: String
+    let appBundleID: String
 }
 
 // MARK: - AccessibilityObserver
@@ -17,346 +14,352 @@ struct TextContext {
 final class AccessibilityObserver {
     static let shared = AccessibilityObserver()
 
-    @MainActor var onTextChanged:        ((TextContext, CGRect) -> Void)?
-    @MainActor var onSelectionTransform: ((String, CGRect) -> Void)?
+    /// Called when the user is typing — Mode A (autocomplete).
+    @MainActor var onTextChanged: ((TextContext, CGRect) -> Void)?
 
-    private var axObserver:      AXObserver?
-    private var observedElement:  AXUIElement?
-    private var lastPrompt:      String = ""
-    private var debounceTask:    Task<Void, Never>?
-    private var eventTap:        CFMachPort?
-    private var tapRunLoopSrc:   CFRunLoopSource?
-    private var currentAppName:  String = ""
-    private var currentBundle:   String = ""
+    /// Called when the user selects text — Mode B (FAB / transform).
+    /// Passes the selected string and the bounding rect of the selection.
+    /// Passes an empty string when the selection is cleared.
+    @MainActor var onSelectionChanged: ((String, CGRect) -> Void)?
 
-    private var isInjecting = false
-    private var isTrusted: Bool { AXIsProcessTrusted() }
+    private var observer: AXObserver?
+    private var observedElement: AXUIElement?
+    private var lastPrompt: String = ""
+    private var lastSelection: String = ""
+    private var debounceTask: Task<Void, Never>?
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+
+    private var isAccessibilityTrusted: Bool { AXIsProcessTrusted() }
 
     private init() {}
 
+    // MARK: - Start / Stop
+
     func startObserving() {
-        guard isTrusted else { print("[AX] No accessibility access."); return }
-        setupEventTap()
+        guard isAccessibilityTrusted else {
+            print("[AccessibilityObserver] Cannot start observing: accessibility access not granted.")
+            return
+        }
+
+        setupKeyEventTap()
         NSWorkspace.shared.notificationCenter.addObserver(
-            self, selector: #selector(frontAppChanged(_:)),
-            name: NSWorkspace.didActivateApplicationNotification, object: nil)
-        if let app = NSWorkspace.shared.frontmostApplication { attach(to: app) }
+            self,
+            selector: #selector(frontAppChanged(_:)),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
+
+        if let app = NSWorkspace.shared.frontmostApplication {
+            attachObserver(to: app)
+        }
     }
 
     func stopObserving() {
-        detachCurrent()
-        if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false) }
-        if let src = tapRunLoopSrc {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
-            tapRunLoopSrc = nil
+        removeCurrentObserver()
+
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            runLoopSource = nil
         }
         eventTap = nil
+
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
-    // MARK: - Event tap
+    // MARK: - Key event tap
 
-    private func setupEventTap() {
-        guard isTrusted else { return }
+    private func setupKeyEventTap() {
+        guard isAccessibilityTrusted else {
+            print("[AccessibilityObserver] Skipping event tap setup: not trusted.")
+            return
+        }
 
-        let mask: CGEventMask = 1 << CGEventType.keyDown.rawValue
+        let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
         eventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .listenOnly,
             eventsOfInterest: mask,
-            callback: { (_, type, event, refcon) -> Unmanaged<CGEvent>? in
-                guard type == .keyDown, let refcon = refcon else {
-                    return Unmanaged.passRetained(event)
-                }
-
-                let obs = Unmanaged<AccessibilityObserver>.fromOpaque(refcon).takeUnretainedValue()
-                let keyCode  = Int(event.getIntegerValueField(.keyboardEventKeycode))
-                let rawFlags = event.flags.rawValue
-                let s        = AppSettings.shared
-
-                let matches: (HotkeyConfig) -> Bool = { hk in
-                    guard keyCode == hk.keyCode else { return false }
-                    if hk.modifierFlags == 0 { return true }
-                    return rawFlags & hk.modifierFlags != 0
-                }
-
-                if keyCode == 48 { // Tab
-                    if let suggestion = OverlayWindowController.currentSuggestion,
-                       !suggestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Task { @MainActor in await obs.handleAccept() }
-                        return nil
+            callback: { _, type, event, refcon -> Unmanaged<CGEvent>? in
+                guard type == .keyDown else { return Unmanaged.passRetained(event) }
+                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                let acceptCode = Int64(AppSettings.shared.acceptHotkeyCode)
+                if keyCode == acceptCode {
+                    guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+                    let observer = Unmanaged<AccessibilityObserver>.fromOpaque(refcon).takeUnretainedValue()
+                    Task { @MainActor in
+                        await observer.handleTabPressed()
                     }
-                    return Unmanaged.passRetained(event)
                 }
-
-                if matches(s.acceptHotkey) {
-                    Task { @MainActor in await obs.handleAccept() }
-                    return nil
-                } else if matches(s.dismissHotkey) {
-                    Task { @MainActor in obs.handleDismiss() }
-                    return nil
-                }
-
                 return Unmanaged.passRetained(event)
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         )
 
-        guard let tap = eventTap else { print("[AX] Failed to create event tap"); return }
-        tapRunLoopSrc = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        if let src = tapRunLoopSrc { CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes) }
-        CGEvent.tapEnable(tap: tap, enable: true)
+        if let tap = eventTap {
+            runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+            if let source = runLoopSource {
+                CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+            }
+            CGEvent.tapEnable(tap: tap, enable: true)
+        } else {
+            print("[AccessibilityObserver] Could not create event tap — ensure Accessibility is granted and the app is not sandboxed.")
+        }
     }
 
     // MARK: - App switching
 
-    @objc private func frontAppChanged(_ note: Notification) {
-        guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-        currentAppName = app.localizedName ?? ""
-        currentBundle  = app.bundleIdentifier ?? ""
-        attach(to: app)
+    @objc private func frontAppChanged(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+        attachObserver(to: app)
     }
 
-    private func attach(to app: NSRunningApplication) {
-        guard AXIsProcessTrusted(), app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
-        detachCurrent()
+    private func attachObserver(to app: NSRunningApplication) {
+        guard isAccessibilityTrusted else { return }
+        guard app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
 
-        let pid        = app.processIdentifier
+        removeCurrentObserver()
+
+        let pid = app.processIdentifier
         let appElement = AXUIElementCreateApplication(pid)
-        var raw: AXObserver?
-        guard AXObserverCreate(pid, axCallbackFn, &raw) == .success, let obs = raw else { return }
 
-        let ptr    = Unmanaged.passUnretained(self).toOpaque()
-        let notifs: [CFString] = [
+        var newObserver: AXObserver?
+        let err = AXObserverCreate(pid, axCallback, &newObserver)
+        guard err == .success, let obs = newObserver else {
+            print("[AccessibilityObserver] Failed to create AXObserver for PID \(pid), error: \(err.rawValue)")
+            return
+        }
+
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+
+        let notifications: [CFString] = [
             kAXFocusedUIElementChangedNotification as CFString,
             kAXValueChangedNotification as CFString,
             kAXSelectedTextChangedNotification as CFString
         ]
-        for n in notifs { AXObserverAddNotification(obs, appElement, n, ptr) }
-        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .defaultMode)
-        axObserver      = obs
+
+        for notification in notifications {
+            let result = AXObserverAddNotification(obs, appElement, notification, selfPtr)
+            if result != .success {
+                print("[AccessibilityObserver] Failed to add notification \(notification): \(result.rawValue)")
+                return
+            }
+        }
+
+        let runLoopSource = AXObserverGetRunLoopSource(obs)
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .defaultMode)
+
+        observer = obs
         observedElement = appElement
-        Task { @MainActor in self.readFocused(in: appElement) }
+
+        Task { @MainActor in
+            self.readFocusedElement(in: appElement)
+        }
     }
 
-    private func detachCurrent() {
-        guard let obs = axObserver, let el = observedElement else { return }
-        let notifs: [CFString] = [
-            kAXFocusedUIElementChangedNotification as CFString,
-            kAXValueChangedNotification as CFString,
-            kAXSelectedTextChangedNotification as CFString
-        ]
-        for n in notifs { AXObserverRemoveNotification(obs, el, n) }
-        axObserver      = nil
+    private func removeCurrentObserver() {
+        if let obs = observer, let el = observedElement {
+            let notifications: [CFString] = [
+                kAXFocusedUIElementChangedNotification as CFString,
+                kAXValueChangedNotification as CFString,
+                kAXSelectedTextChangedNotification as CFString
+            ]
+            for notification in notifications {
+                AXObserverRemoveNotification(obs, el, notification)
+            }
+        }
+        observer = nil
         observedElement = nil
     }
 
-    private let axCallbackFn: AXObserverCallback = { (_, element, _, refcon) in
+    // MARK: - AX Callback
+
+    private let axCallback: AXObserverCallback = { _, element, notification, refcon in
         guard let refcon = refcon else { return }
-        let obs = Unmanaged<AccessibilityObserver>.fromOpaque(refcon).takeUnretainedValue()
-        Task { @MainActor in obs.elementChanged(element) }
+        let observer = Unmanaged<AccessibilityObserver>.fromOpaque(refcon).takeUnretainedValue()
+        let notif = notification as String
+        Task { @MainActor in
+            observer.elementChanged(element, notification: notif)
+        }
     }
 
+    // MARK: - Element reading
+
     @MainActor
-    private func elementChanged(_ element: AXUIElement) {
-        guard !isInjecting else { return }
+    private func elementChanged(_ element: AXUIElement, notification: String) {
         debounceTask?.cancel()
         debounceTask = Task {
-            let ns = UInt64(AppSettings.shared.triggerDelay * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: ns)
-            guard !Task.isCancelled else { return }
-            self.readFocused(in: element)
+            try? await Task.sleep(nanoseconds: UInt64(AppSettings.shared.triggerDelay * 1_000_000_000))
+            if !Task.isCancelled {
+                self.readFocusedElement(in: element)
+            }
         }
     }
 
     @MainActor
-    private func readFocused(in element: AXUIElement) {
-        var focusedRef: CFTypeRef?
+    private func readFocusedElement(in element: AXUIElement) {
+        var focusedValue: CFTypeRef?
         var target = element
-        if AXUIElementCopyAttributeValue(element, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
-           let v = focusedRef, CFGetTypeID(v) == AXUIElementGetTypeID() {
-            target = v as! AXUIElement
+
+        if AXUIElementCopyAttributeValue(element, kAXFocusedUIElementAttribute as CFString, &focusedValue) == .success,
+           let value = focusedValue,
+           CFGetTypeID(value) == AXUIElementGetTypeID() {
+            target = value as! AXUIElement
         }
 
-        guard let ctx = extractContext(from: target) else { return }
-        guard ctx.textBeforeCursor != lastPrompt else { return }
-        lastPrompt = ctx.textBeforeCursor
+        guard let context = extractTextContext(from: target) else { return }
 
-        let rect = selectedTextRect(for: target)
-
-        if !ctx.selectedText.isEmpty && AppSettings.shared.transformMode != .autocomplete {
-            onSelectionTransform?(ctx.selectedText, rect)
-            return
+        // --- Mode B: fire selection callback whenever selected text changes ---
+        if context.selectedText != lastSelection {
+            lastSelection = context.selectedText
+            let selRect = getCursorScreenRect(from: target)
+            onSelectionChanged?(context.selectedText, selRect)
         }
-        onTextChanged?(ctx, rect)
+
+        // --- Mode A: fire autocomplete callback only when text-before-cursor changes ---
+        guard context.textBeforeCursor != lastPrompt else { return }
+        lastPrompt = context.textBeforeCursor
+
+        let cursorRect = getCursorScreenRect(from: target)
+        onTextChanged?(context, cursorRect)
     }
 
-    private func extractContext(from element: AXUIElement) -> TextContext? {
-        var roleRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
-        let role = roleRef as? String ?? ""
-        guard [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role) else { return nil }
+    private func extractTextContext(from element: AXUIElement) -> TextContext? {
+        var roleValue: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue)
+        let role = roleValue as? String ?? ""
+        let validRoles: Set<String> = [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole]
+        guard validRoles.contains(role) else { return nil }
 
-        var valRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valRef) == .success,
-              let fullText = valRef as? String else { return nil }
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
+              let fullText = valueRef as? String else { return nil }
 
-        var rangeRef: CFTypeRef?
-        var cursorIdx = fullText.endIndex
-        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-           let v = rangeRef, CFGetTypeID(v) == AXValueGetTypeID() {
-            let axVal = v as! AXValue
-            if AXValueGetType(axVal) == .cfRange {
-                var cfr = CFRange(location: 0, length: 0)
-                if AXValueGetValue(axVal, .cfRange, &cfr) {
-                    let idx = min(cfr.location, fullText.count)
-                    cursorIdx = fullText.index(fullText.startIndex, offsetBy: idx,
-                                               limitedBy: fullText.endIndex) ?? fullText.endIndex
+        var rangeValue: CFTypeRef?
+        var cursorIndex = fullText.endIndex
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeValue) == .success,
+           let value = rangeValue,
+           CFGetTypeID(value) == AXValueGetTypeID() {
+            let rangeRef = value as! AXValue
+            if AXValueGetType(rangeRef) == .cfRange {
+                var range = CFRange(location: 0, length: 0)
+                if AXValueGetValue(rangeRef, .cfRange, &range) {
+                    let idx = min(range.location, fullText.count)
+                    cursorIndex = fullText.index(fullText.startIndex, offsetBy: idx, limitedBy: fullText.endIndex) ?? fullText.endIndex
                 }
             }
         }
 
-        let before  = String(fullText[..<cursorIdx])
-        guard !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        let trimmed = before.count > 2048 ? String(before.suffix(2048)) : before
+        let textBefore = String(fullText[..<cursorIndex])
+        guard !textBefore.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
 
-        var selText = ""
-        var selRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selRef) == .success {
-            selText = (selRef as? String) ?? ""
+        let trimmed = textBefore.count > 512 ? String(textBefore.suffix(512)) : textBefore
+
+        var selectedText = ""
+        var selValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selValue) == .success {
+            selectedText = (selValue as? String) ?? ""
         }
 
-        return TextContext(
-            textBeforeCursor: trimmed,
-            selectedText:     selText,
-            appBundleID:      currentBundle,
-            appName:          currentAppName,
-            fullText:         fullText
-        )
+        let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        return TextContext(textBeforeCursor: trimmed, selectedText: selectedText, appBundleID: bundleID)
     }
 
-    // MARK: - Bounding box (refactored)
-    //
-    // Priority:
-    //   1. kAXBoundsForRangeParameterizedAttribute on the insertion-point range — most accurate.
-    //   2. kAXBoundsForRangeParameterizedAttribute on the full selected range — good for multi-char selections.
-    //   3. Element position + height fallback — last resort.
-    //
-    // All CGRect values coming from AX are in screen coordinates (top-left origin).
-    // NSWindow/NSScreen use bottom-left origin, so we do NOT flip here;
-    // callers that need flipping (OverlayWindowController) handle it in positionOverlay/positionFAB.
+    // MARK: - Cursor screen rect
 
-    func selectedTextRect(for element: AXUIElement) -> CGRect {
-        // --- 1. Read the current selected-text range ---
-        var rangeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element,
-                                            kAXSelectedTextRangeAttribute as CFString,
-                                            &rangeRef) == .success,
-              let rv = rangeRef,
-              CFGetTypeID(rv) == AXValueGetTypeID()
-        else { return elementFallbackRect(for: element) }
-
-        let axRangeVal = rv as! AXValue
-        guard AXValueGetType(axRangeVal) == .cfRange else { return elementFallbackRect(for: element) }
-        var cfRange = CFRange(location: 0, length: 0)
-        guard AXValueGetValue(axRangeVal, .cfRange, &cfRange) else { return elementFallbackRect(for: element) }
-
-        // --- 2. Try insertion-point rect (zero-length range at cursor) ---
-        let insertionRange = CFRange(location: max(cfRange.location + cfRange.length - 1, 0), length: 0)
-        if let rect = boundsForRange(insertionRange, in: element), rect != .zero {
-            return rect
+    func getCursorScreenRect(from element: AXUIElement) -> CGRect {
+        var rangeValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeValue) == .success,
+           let value = rangeValue,
+           CFGetTypeID(value) == AXValueGetTypeID() {
+            let rangeRef = value as! AXValue
+            if AXValueGetType(rangeRef) == .cfRange {
+                var range = CFRange(location: 0, length: 0)
+                if AXValueGetValue(rangeRef, .cfRange, &range) {
+                    let insertionRange = CFRange(location: range.location, length: 0)
+                    var mutableInsertionRange = insertionRange
+                    if let axRange = AXValueCreate(.cfRange, &mutableInsertionRange) {
+                        var boundsRef: CFTypeRef?
+                        if AXUIElementCopyParameterizedAttributeValue(
+                            element,
+                            kAXBoundsForRangeParameterizedAttribute as CFString,
+                            axRange,
+                            &boundsRef
+                        ) == .success,
+                           let boundsValue = boundsRef,
+                           CFGetTypeID(boundsValue) == AXValueGetTypeID() {
+                            let boundsVal = boundsValue as! AXValue
+                            if AXValueGetType(boundsVal) == .cgRect {
+                                var rect = CGRect.zero
+                                if AXValueGetValue(boundsVal, .cgRect, &rect), rect != .zero {
+                                    return rect
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        // --- 3. Try full selection rect ---
-        if cfRange.length > 0, let rect = boundsForRange(cfRange, in: element), rect != .zero {
-            return rect
-        }
-
-        // --- 4. Element-level fallback ---
-        return elementFallbackRect(for: element)
-    }
-
-    /// Asks the AX API for the screen rect of a given CFRange within an element.
-    private func boundsForRange(_ range: CFRange, in element: AXUIElement) -> CGRect? {
-        var mutableRange = range
-        guard let axValue = AXValueCreate(.cfRange, &mutableRange) else { return nil }
-        var boundsRef: CFTypeRef?
-        guard AXUIElementCopyParameterizedAttributeValue(
-            element,
-            kAXBoundsForRangeParameterizedAttribute as CFString,
-            axValue,
-            &boundsRef
-        ) == .success,
-              let bv = boundsRef,
-              CFGetTypeID(bv) == AXValueGetTypeID()
-        else { return nil }
-
-        let bAxVal = bv as! AXValue
-        guard AXValueGetType(bAxVal) == .cgRect else { return nil }
-        var rect = CGRect.zero
-        AXValueGetValue(bAxVal, .cgRect, &rect)
-        return rect == .zero ? nil : rect
-    }
-
-    /// Falls back to the element's own position + size when range-based lookup fails.
-    private func elementFallbackRect(for element: AXUIElement) -> CGRect {
         var origin = CGPoint.zero
-        var size   = CGSize.zero
+        var size = CGSize.zero
 
         var posRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef) == .success,
-           let v = posRef, CFGetTypeID(v) == AXValueGetTypeID() {
-            AXValueGetValue(v as! AXValue, .cgPoint, &origin)
+           let value = posRef,
+           CFGetTypeID(value) == AXValueGetTypeID() {
+            let pv = value as! AXValue
+            if AXValueGetType(pv) == .cgPoint {
+                AXValueGetValue(pv, .cgPoint, &origin)
+            }
         }
 
         var sizeRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
-           let v = sizeRef, CFGetTypeID(v) == AXValueGetTypeID() {
-            AXValueGetValue(v as! AXValue, .cgSize, &size)
+           let value = sizeRef,
+           CFGetTypeID(value) == AXValueGetTypeID() {
+            let sv = value as! AXValue
+            if AXValueGetType(sv) == .cgSize {
+                AXValueGetValue(sv, .cgSize, &size)
+            }
         }
 
-        // Position the overlay just below the element
         return CGRect(x: origin.x, y: origin.y + size.height, width: size.width, height: 20)
     }
 
-    // Keep old name as an alias so existing call-sites in LuminaApp.swift don't break.
-    func cursorRect(for element: AXUIElement) -> CGRect {
-        selectedTextRect(for: element)
+    // MARK: - Tab injection
+
+    /// Injects the result of a Mode B (transform) action, replacing the current selection.
+    @MainActor
+    func injectTransformResult(_ text: String) {
+        injectText(text)
     }
 
-    // MARK: - Actions
-
     @MainActor
-    func handleAccept() async {
-        guard let suggestion = OverlayWindowController.currentSuggestion,
-              !suggestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    func handleTabPressed() async {
+        guard let suggestion = OverlayWindowController.currentSuggestion, !suggestion.isEmpty else { return }
+
         NotificationCenter.default.post(name: .suggestionAccepted, object: nil)
-        inject(suggestion)
+        injectText(suggestion)
     }
 
     @MainActor
-    func handleDismiss() {
-        guard OverlayWindowController.currentSuggestion != nil else { return }
-        NotificationCenter.default.post(name: .suggestionDismissed, object: nil)
-    }
+    private func injectText(_ text: String) {
+        guard let source = CGEventSource(stateID: .hidSystemState) else { return }
 
-    @MainActor
-    private func inject(_ text: String) {
-        isInjecting = true
-        defer {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.isInjecting = false }
-        }
+        let utf16Chars = Array(text.utf16)
+        guard let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+              let eventUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { return }
 
-        guard let src = CGEventSource(stateID: .hidSystemState) else { return }
-        let utf16 = Array(text.utf16)
-        guard let dn = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true),
-              let up = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false) else { return }
+        eventDown.keyboardSetUnicodeString(stringLength: utf16Chars.count, unicodeString: utf16Chars)
+        eventUp.keyboardSetUnicodeString(stringLength: utf16Chars.count, unicodeString: utf16Chars)
 
-        dn.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
-        up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
-        dn.post(tap: .cgSessionEventTap)
-        up.post(tap: .cgSessionEventTap)
+        eventDown.post(tap: .cgSessionEventTap)
+        eventUp.post(tap: .cgSessionEventTap)
 
         lastPrompt = ""
     }
