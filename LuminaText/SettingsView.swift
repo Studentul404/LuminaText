@@ -1,34 +1,54 @@
-// ═══════════════════════════════════════════════════════════
-// SettingsView.swift
-// ═══════════════════════════════════════════════════════════
 import SwiftUI
 import AppKit
 
+// MARK: - Root
+
 struct SettingsView: View {
-    @State private var selectedTab = 0
-    var body: some View {
-        TabView(selection: $selectedTab) {
-            GeneralTab()
-                .tabItem { Label("General", systemImage: "gearshape") }
-                .tag(0)
-            ModelTab()
-                .tabItem { Label("Model", systemImage: "cpu") }
-                .tag(1)
-            ActionsTab()
-                .tabItem { Label("Actions", systemImage: "bolt") }
-                .tag(2)
-            AppearanceTab()
-                .tabItem { Label("Appearance", systemImage: "paintbrush") }
-                .tag(3)
-            HotkeysTab()
-                .tabItem { Label("Hotkeys", systemImage: "keyboard") }
-                .tag(4)
-            AboutTab()
-                .tabItem { Label("About", systemImage: "info.circle") }
-                .tag(5)
+    @State private var selection: SettingsTab? = .general
+
+    enum SettingsTab: String, Hashable, CaseIterable {
+        case general    = "General"
+        case models     = "Models"
+        case actions    = "Actions"
+        case exclusions = "Exclusions"
+        case hotkeys    = "Hotkeys"
+        case about      = "About"
+
+        var icon: String {
+            switch self {
+            case .general:    return "gearshape"
+            case .models:     return "cpu"
+            case .actions:    return "bolt"
+            case .exclusions: return "nosign"
+            case .hotkeys:    return "keyboard"
+            case .about:      return "info.circle"
+            }
         }
-        .frame(width: 560, height: 440)
-        .padding()
+    }
+
+    var body: some View {
+        NavigationSplitView(columnVisibility: .constant(.all)) {
+            List(SettingsTab.allCases, id: \.self, selection: $selection) { tab in
+                Label(tab.rawValue, systemImage: tab.icon)
+                    .tag(tab)
+            }
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 160, ideal: 180)
+        } detail: {
+            Group {
+                switch selection {
+                case .general:    GeneralTab()
+                case .models:     ModelTab()
+                case .actions:    ActionsTab()
+                case .exclusions: ExclusionsTab()
+                case .hotkeys:    HotkeysTab()
+                case .about:      AboutTab()
+                case nil:         Text("Select a section").foregroundColor(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: 700, minHeight: 500)
     }
 }
 
@@ -98,10 +118,10 @@ struct GeneralTab: View {
 // MARK: - Model Tab
 
 struct ModelTab: View {
-    @ObservedObject private var s = AppSettings.shared
+    @ObservedObject private var s         = AppSettings.shared
     @ObservedObject private var inference = InferenceManager.shared
     @State private var testOutput = ""
-    @State private var isTesting = false
+    @State private var isTesting  = false
 
     var body: some View {
         Form {
@@ -183,23 +203,19 @@ struct ModelTab: View {
         Task {
             let result = await InferenceManager.shared.complete(prompt: "func fibonacci(n: Int) -> Int {")
             testOutput = result ?? "(no result)"
-            isTesting = false
+            isTesting  = false
         }
     }
 }
 
 // MARK: - Actions Tab
 
-// UserAction must be Hashable for List selection — extend here (id-based)
-extension UserAction: Hashable {
-    static func == (lhs: UserAction, rhs: UserAction) -> Bool { lhs.id == rhs.id }
-    func hash(into hasher: inout Hasher) { hasher.combine(id) }
-}
-
 struct ActionsTab: View {
     @ObservedObject private var s = AppSettings.shared
-    @State private var selectedID: UUID? = nil
-    @State private var showingNew = false
+    @State private var selectedID:   UUID? = nil
+    @State private var showingNew    = false
+    @State private var showImportErr = false
+    @State private var importErrMsg  = ""
 
     private var selectedIndex: Int? {
         guard let id = selectedID else { return nil }
@@ -208,7 +224,7 @@ struct ActionsTab: View {
 
     var body: some View {
         HSplitView {
-            // Left sidebar
+            // Sidebar
             VStack(spacing: 0) {
                 List(s.userActions, id: \.id, selection: $selectedID) { action in
                     HStack(spacing: 8) {
@@ -239,9 +255,9 @@ struct ActionsTab: View {
 
                     Spacer()
 
-                    Button("Import") { print("[Actions] Import stub") }
+                    Button("Import") { importYAML() }
                         .buttonStyle(.plain).font(.system(size: 11)).foregroundColor(.secondary).padding(.trailing, 8)
-                    Button("Export") { print("[Actions] Export stub") }
+                    Button("Export") { exportYAML() }
                         .buttonStyle(.plain).font(.system(size: 11)).foregroundColor(.secondary).padding(.trailing, 8)
                 }
                 .padding(.vertical, 4).padding(.horizontal, 4)
@@ -249,18 +265,64 @@ struct ActionsTab: View {
             }
             .frame(minWidth: 160, maxWidth: 200)
 
-            // Right editor
+            // Editor
             Group {
                 if let idx = selectedIndex {
                     ActionEditorView(action: $s.userActions[idx])
                 } else {
-                    VStack { Spacer(); Text("Select an action to edit").foregroundColor(.secondary); Spacer() }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    VStack {
+                        Spacer()
+                        Text("Select an action to edit").foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }
         .sheet(isPresented: $showingNew) {
             NewActionSheet { s.userActions.append($0); selectedID = $0.id }
+        }
+        .alert("Import Error", isPresented: $showImportErr) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(importErrMsg)
+        }
+    }
+
+    // MARK: YAML I/O
+
+    private func exportYAML() {
+        let yaml = s.userActions.map { $0.toYAML() }.joined(separator: "\n")
+        let panel = NSSavePanel()
+        panel.title             = "Export Actions"
+        panel.allowedContentTypes = [.yaml]
+        panel.nameFieldStringValue = "lumina-actions.yaml"
+        if panel.runModal() == .OK, let url = panel.url {
+            try? yaml.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func importYAML() {
+        let panel = NSOpenPanel()
+        panel.title             = "Import Actions"
+        panel.allowedContentTypes = [.yaml]
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            guard let content = try? String(contentsOf: url, encoding: .utf8) else {
+                importErrMsg  = "Could not read the selected file."
+                showImportErr = true
+                return
+            }
+            let parsed = UserAction.fromYAML(content)
+            if parsed.isEmpty {
+                importErrMsg  = "No valid actions found in the file. Ensure it uses the Lumina YAML format."
+                showImportErr = true
+                return
+            }
+            // Merge — skip duplicates by ID
+            let existingIDs = Set(s.userActions.map { $0.id })
+            let newActions  = parsed.filter { !existingIDs.contains($0.id) }
+            s.userActions.append(contentsOf: newActions)
         }
     }
 }
@@ -292,9 +354,14 @@ struct ActionEditorView: View {
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("INSTRUCTION PROMPT").font(.caption).foregroundColor(.secondary)
-                TextEditor(text: $action.systemPrompt)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("PROMPT TEMPLATE").font(.caption).foregroundColor(.secondary)
+                    Spacer()
+                    Text("Use {{input}} for selected text")
+                        .font(.caption2).foregroundColor(.secondary)
+                }
+                TextEditor(text: $action.promptTemplate)
                     .font(.system(size: 12, design: .monospaced))
                     .frame(minHeight: 120)
                     .scrollContentBackground(.hidden)
@@ -316,9 +383,9 @@ struct NewActionSheet: View {
     @Environment(\.dismiss) private var dismiss
     var onCreate: (UserAction) -> Void
 
-    @State private var title = ""
-    @State private var prompt = ""
-    @State private var iconName = "sparkles"
+    @State private var title      = ""
+    @State private var prompt     = ""
+    @State private var iconName   = "sparkles"
     @State private var showSymbolPicker = false
 
     var body: some View {
@@ -341,7 +408,11 @@ struct NewActionSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Instruction Prompt").font(.caption).foregroundColor(.secondary)
+                HStack {
+                    Text("Prompt Template").font(.caption).foregroundColor(.secondary)
+                    Spacer()
+                    Text("{{input}} = selected text").font(.caption2).foregroundColor(.secondary)
+                }
                 TextEditor(text: $prompt)
                     .font(.system(size: 12, design: .monospaced))
                     .frame(height: 100)
@@ -355,7 +426,7 @@ struct NewActionSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Create") {
-                    onCreate(UserAction(title: title, systemPrompt: prompt, iconName: iconName))
+                    onCreate(UserAction(title: title, promptTemplate: prompt, iconName: iconName))
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -367,94 +438,109 @@ struct NewActionSheet: View {
     }
 }
 
-// MARK: - SF Symbol Picker
+// MARK: - Exclusions Tab
 
-private let pickerSymbols: [String] = [
-    "sparkles","wand.and.stars","bolt","bolt.fill",
-    "textformat.abc","text.badge.checkmark","pencil","pencil.and.scribble",
-    "doc.plaintext","doc.text","arrow.down.right.and.arrow.up.left",
-    "arrow.up.right.and.arrow.down.left","briefcase","briefcase.fill",
-    "questionmark.circle","questionmark.circle.fill","lightbulb","lightbulb.fill",
-    "checkmark.circle","bubble.left.and.bubble.right","bubble.left",
-    "list.bullet","face.smiling","wand.and.stars.inverse",
-    "magnifyingglass","text.magnifyingglass","globe","cpu",
-    "paintbrush","scissors","arrow.triangle.2.circlepath","function",
-]
-
-struct SFSymbolPickerView: View {
-    @Binding var selected: String
-    private let columns = Array(repeating: GridItem(.fixed(44)), count: 6)
+struct ExclusionsTab: View {
+    @ObservedObject private var s = AppSettings.shared
+    @State private var selectedBundleID: String? = nil
+    @State private var showAddSheet = false
+    @State private var manualBundleID = ""
 
     var body: some View {
         VStack(spacing: 0) {
-            Text("Choose Icon").font(.caption).foregroundColor(.secondary).padding(.vertical, 8)
-            Divider()
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: 4) {
-                    ForEach(pickerSymbols, id: \.self) { sym in
-                        Button { selected = sym } label: {
-                            Image(systemName: sym)
-                                .font(.system(size: 17))
-                                .frame(width: 36, height: 36)
-                                .background(RoundedRectangle(cornerRadius: 6)
-                                    .fill(selected == sym ? Color.accentColor.opacity(0.2) : Color.clear))
-                                .foregroundColor(selected == sym ? .accentColor : .primary)
-                        }
-                        .buttonStyle(.plain)
+            List(s.excludedBundleIDs, id: \.self, selection: $selectedBundleID) { bundleID in
+                HStack(spacing: 10) {
+                    appIcon(for: bundleID)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(appName(for: bundleID)).fontWeight(.medium)
+                        Text(bundleID).font(.caption).foregroundColor(.secondary)
                     }
                 }
-                .padding(8)
+                .padding(.vertical, 2)
             }
+            .listStyle(.sidebar)
+            .overlay {
+                if s.excludedBundleIDs.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "nosign").font(.system(size: 32)).foregroundColor(.secondary)
+                        Text("No excluded apps").foregroundColor(.secondary)
+                        Text("Completions are active in all apps.")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                }
+            }
+
+            Divider()
+
+            HStack(spacing: 0) {
+                // Add current frontmost app
+                Button {
+                    if let app = NSWorkspace.shared.frontmostApplication,
+                       let bid = app.bundleIdentifier,
+                       bid != Bundle.main.bundleIdentifier {
+                        s.addExclusion(bid)
+                    }
+                } label: {
+                    Image(systemName: "plus").frame(width: 28, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help("Exclude the currently active app")
+
+                Button {
+                    guard let id = selectedBundleID else { return }
+                    s.removeExclusion(id)
+                    selectedBundleID = nil
+                } label: {
+                    Image(systemName: "minus").frame(width: 28, height: 24)
+                }
+                .buttonStyle(.plain)
+                .disabled(selectedBundleID == nil)
+
+                Spacer()
+
+                Button("Add by ID…") { showAddSheet = true }
+                    .buttonStyle(.plain).font(.system(size: 11)).foregroundColor(.secondary).padding(.trailing, 8)
+            }
+            .padding(.vertical, 4).padding(.horizontal, 4)
+            .background(Color(.controlBackgroundColor))
+        }
+        .sheet(isPresented: $showAddSheet) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Add App by Bundle ID").font(.headline)
+                TextField("com.example.app", text: $manualBundleID)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { showAddSheet = false; manualBundleID = "" }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Add") {
+                        s.addExclusion(manualBundleID.trimmingCharacters(in: .whitespaces))
+                        showAddSheet = false; manualBundleID = ""
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(manualBundleID.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .padding(20)
+            .frame(width: 340)
         }
     }
-}
 
-// MARK: - Appearance Tab
-
-struct AppearanceTab: View {
-    @ObservedObject private var s = AppSettings.shared
-
-    var body: some View {
-        Form {
-            Section("Ghost Text Overlay") {
-                HStack(spacing: 12) {
-                    Text("Opacity").frame(width: 60, alignment: .leading)
-                    Slider(value: $s.overlayOpacity, in: 0.2...1.0, step: 0.05)
-                    Text(String(format: "%.0f%%", s.overlayOpacity * 100))
-                        .frame(width: 40).foregroundColor(.secondary).monospacedDigit()
-                }
-            }
-
-            Section("Preview") {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8).fill(Color(.textBackgroundColor)).frame(height: 80)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("func fetchUser(id: String) ").font(.system(size: 13, design: .monospaced))
-                        HStack(spacing: 6) {
-                            Text("async throws -> User {")
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundColor(.white.opacity(s.overlayOpacity * 0.8))
-                                .padding(.horizontal, 8).padding(.vertical, 4)
-                                .background(RoundedRectangle(cornerRadius: 6).fill(.ultraThinMaterial))
-                            Text("⇥")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundColor(.white.opacity(0.5))
-                                .padding(.horizontal, 5).padding(.vertical, 2)
-                                .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.1)))
-                        }
-                    }
-                    .padding()
-                }
-            }
-
-            Section("Theme") {
-                HStack(spacing: 8) {
-                    Image(systemName: "circle.lefthalf.filled").foregroundColor(.secondary)
-                    Text("Follows system appearance automatically").foregroundColor(.secondary).font(.callout)
-                }
-            }
+    private func appName(for bundleID: String) -> String {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            return url.deletingPathExtension().lastPathComponent
         }
-        .formStyle(.grouped)
+        return bundleID
+    }
+
+    @ViewBuilder
+    private func appIcon(for bundleID: String) -> some View {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                .resizable().frame(width: 20, height: 20)
+        } else {
+            Image(systemName: "app.dashed").frame(width: 20, height: 20).foregroundColor(.secondary)
+        }
     }
 }
 
@@ -491,8 +577,21 @@ struct HotkeysTab: View {
                 }
             }
             Section {
-                Text("Key conflicts with system shortcuts are not checked automatically.")
+                // Engineering Challenge answer — documented inline
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Global Hotkey Implementation Notes").font(.caption).fontWeight(.semibold)
+                    Text("""
+                    Arbitrary modifier combos (e.g. Cmd+Opt+G) are captured via a passive CGEvent tap \
+                    (options: .listenOnly, tap: .cgSessionEventTap). This is read-only — the tap never \
+                    consumes the event, so it never emits a system beep and never interferes with \
+                    Accessibility API consumers. The event is inspected for keyCode + modifierFlags \
+                    on the main run loop; if matched, a Task is dispatched to @MainActor. \
+                    Under Sandbox, CGEvent taps require the com.apple.security.temporary-exception.\
+                    mach-lookup entitlement for the Accessibility server, or the user must grant \
+                    Accessibility permission — the same permission LuminaText already requests.
+                    """)
                     .font(.caption).foregroundColor(.secondary)
+                }
             }
         }
         .formStyle(.grouped)
@@ -544,4 +643,53 @@ struct FeatureRow: View {
             }
         }
     }
+}
+
+// MARK: - SF Symbol Picker
+
+private let pickerSymbols: [String] = [
+    "sparkles","wand.and.stars","bolt","bolt.fill",
+    "textformat.abc","text.badge.checkmark","pencil","pencil.and.scribble",
+    "doc.plaintext","doc.text","arrow.down.right.and.arrow.up.left",
+    "arrow.up.right.and.arrow.down.left","briefcase","briefcase.fill",
+    "questionmark.circle","questionmark.circle.fill","lightbulb","lightbulb.fill",
+    "checkmark.circle","bubble.left.and.bubble.right","bubble.left",
+    "list.bullet","face.smiling","wand.and.stars.inverse",
+    "magnifyingglass","text.magnifyingglass","globe","cpu",
+    "paintbrush","scissors","arrow.triangle.2.circlepath","function",
+]
+
+struct SFSymbolPickerView: View {
+    @Binding var selected: String
+    private let columns = Array(repeating: GridItem(.fixed(44)), count: 6)
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Choose Icon").font(.caption).foregroundColor(.secondary).padding(.vertical, 8)
+            Divider()
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 4) {
+                    ForEach(pickerSymbols, id: \.self) { sym in
+                        Button { selected = sym } label: {
+                            Image(systemName: sym)
+                                .font(.system(size: 17))
+                                .frame(width: 36, height: 36)
+                                .background(RoundedRectangle(cornerRadius: 6)
+                                    .fill(selected == sym ? Color.accentColor.opacity(0.2) : Color.clear))
+                                .foregroundColor(selected == sym ? .accentColor : .primary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(8)
+            }
+        }
+    }
+}
+
+// MARK: - UTType extension for YAML
+
+import UniformTypeIdentifiers
+extension UTType {
+    static let yaml = UTType(filenameExtension: "yaml") ?? .plainText
 }

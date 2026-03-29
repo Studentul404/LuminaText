@@ -1,21 +1,17 @@
 import Foundation
 import Combine
 
-// MARK: - Completion Mode
-
 enum CompletionMode {
-    case autocomplete   // Mode A — triggered by typing
-    case transform      // Mode B — triggered by selection + FAB action
+    case autocomplete
+    case transform
 }
-
-// MARK: - InferenceManager
 
 @MainActor
 final class InferenceManager: ObservableObject {
     static let shared = InferenceManager()
 
-    @Published var isReady = false
-    @Published var backendName = "Loading…"
+    @Published var isReady      = false
+    @Published var backendName  = "Loading…"
     @Published var isGenerating = false
 
     private var backend: InferenceBackend?
@@ -30,22 +26,22 @@ final class InferenceManager: ObservableObject {
 
         let mlx = MLXBackend()
         if await mlx.load() {
-            backend = mlx
+            backend     = mlx
             backendName = "MLX · Qwen2.5-Coder-0.5B"
-            isReady = true
+            isReady     = true
             return
         }
 
         let ollama = OllamaBackend()
         if await ollama.ping() {
-            backend = ollama
+            backend     = ollama
             backendName = ollama.displayName
-            isReady = true
+            isReady     = true
             return
         }
 
         backendName = "No backend available"
-        isReady = false
+        isReady     = false
     }
 
     // MARK: - Complete (Mode A — Autocomplete)
@@ -57,12 +53,11 @@ final class InferenceManager: ObservableObject {
             guard !Task.isCancelled else { return nil }
             isGenerating = true
             defer { isGenerating = false }
-            
             return await backend.complete(
-                prompt: prompt,
+                prompt:       prompt,
                 systemPrompt: AppSettings.shared.systemPrompt,
-                maxTokens: AppSettings.shared.maxTokens,
-                temperature: AppSettings.shared.temperature
+                maxTokens:    AppSettings.shared.maxTokens,
+                temperature:  AppSettings.shared.temperature
             )
         }
         pendingTask = task
@@ -70,6 +65,10 @@ final class InferenceManager: ObservableObject {
     }
 
     // MARK: - Transform (Mode B — Selection + Action)
+    //
+    // The full rendered prompt (system + {{input}} substitution) goes into
+    // systemPrompt. user message is intentionally empty to reduce hallucinations
+    // and keep the model on-task.
 
     func transform(selectedText: String, action: UserAction) async -> String? {
         guard isReady, let backend else { return nil }
@@ -78,13 +77,17 @@ final class InferenceManager: ObservableObject {
             guard !Task.isCancelled else { return nil }
             isGenerating = true
             defer { isGenerating = false }
-            
-            // Використовуємо systemPrompt з нової структури UserAction
+
+            let finalPrompt = AppSettings.shared.renderPrompt(
+                template: action.promptTemplate,
+                input:    selectedText
+            )
+
             return await backend.complete(
-                prompt: selectedText,
-                systemPrompt: action.systemPrompt,
-                maxTokens: AppSettings.shared.maxTokens,
-                temperature: AppSettings.shared.temperature
+                prompt:       "",           // empty user turn — all context in system prompt
+                systemPrompt: finalPrompt,
+                maxTokens:    AppSettings.shared.maxTokens,
+                temperature:  AppSettings.shared.temperature
             )
         }
         pendingTask = task

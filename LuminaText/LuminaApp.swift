@@ -94,36 +94,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Text / Selection handling
 
+    // MARK: - Text / Selection handling
+
     private func handleTextChange(context: TextContext, cursorRect: CGRect) {
-        guard AppSettings.shared.isEnabled else { return }
-        guard !context.textBeforeCursor.trimmingCharacters(in: .whitespaces).isEmpty else {
-            overlayWindowController?.hide(); return
+        // 1. Ensure we don't trigger AI on empty or trivial context
+        guard !context.textBeforeCursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            self.overlayWindowController?.hide()
+            return
         }
+
         Task {
-            let suggestion = await inferenceManager.complete(prompt: context.textBeforeCursor)
-            if let suggestion, !suggestion.isEmpty {
-                overlayWindowController?.show(
-                    suggestion: suggestion, 
-                    selectedText: "", // Добавьте этот аргумент
-                    near: cursorRect
-                )
-            } else {
-                overlayWindowController?.hide()
+            // 2. Extract the STRING property 'fimPrompt' from the 'context' struct
+            // This satisfies the InferenceManager's (prompt: String) signature
+            if let result = await inferenceManager.complete(prompt: context.fimPrompt) {
+                
+                // 3. UI updates must occur on the MainActor
+                await MainActor.run {
+                    self.overlayWindowController?.show(suggestion: result, near: cursorRect)
+                }
             }
         }
     }
 
     private func handleSelectionChange(selectedText: String, rect: CGRect) {
-    // 1. Скрываем старый GhostOverlay, если он мешает
-    overlayWindowController?.hide() 
-
-    // 2. Показываем только FAB
-    if !selectedText.isEmpty {
-        fabWindowController?.show(selectedText: selectedText, near: rect)
-    } else {
-        fabWindowController?.hide()
+        guard AppSettings.shared.isEnabled else { return }
+        if selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            fabWindowController?.hide()
+        } else {
+            fabWindowController?.show(selectedText: selectedText, near: rect)
+        }
     }
-}
 
     @objc private func fabActionCompleted(_ notification: Notification) {
         guard let result = notification.object as? String, !result.isEmpty else { return }

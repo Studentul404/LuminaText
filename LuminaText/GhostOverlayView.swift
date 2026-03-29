@@ -1,205 +1,170 @@
 import SwiftUI
 import AppKit
+import QuartzCore
 import Combine
 
 // MARK: - View Model
+
 @MainActor
 final class GhostOverlayViewModel: ObservableObject {
     @Published var suggestion: String = ""
-    @Published var selectedText: String = ""
-    @Published var isProcessing: Bool = false
-    @Published var resultText: String? = nil
 }
 
 // MARK: - Overlay Window Controller
+
 @MainActor
 final class OverlayWindowController {
+
     static var currentSuggestion: String?
-    
-    private var window: NSWindow?
+
+    private var panel: NSPanel?
     private let viewModel = GhostOverlayViewModel()
-    
+
+    // Fixed dimensions — NSHostingView must never negotiate size with the window.
+    // Variable-height content (the FAB action list) lives in FABWindowController.
+    private let panelWidth:  CGFloat = 320
+    private let panelHeight: CGFloat = 36
+
     init() {
-        // We use a larger initial frame but a clear background.
-        // The window will only "exist" where the SwiftUI content is opaque.
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 280, height: 450),
-            styleMask: [.borderless, .nonactivatingPanel],
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
+            styleMask: [
+                .borderless,
+                .nonactivatingPanel   // NSPanel-only flag — valid here, was invalid on NSWindow
+            ],
             backing: .buffered,
-            defer: false
+            defer: false              // false: backing store created immediately, no deferred layout surprises
         )
-        
+
+        panel.isOpaque          = false
+        panel.backgroundColor   = .clear
+        panel.hasShadow         = false
+        panel.level             = .floating
+        panel.ignoresMouseEvents = true   // ghost text is display-only; Tab is handled via CGEvent tap
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        panel.animationBehavior  = .none
+
         let hosting = NSHostingView(rootView: GhostOverlayView(viewModel: viewModel))
-        win.contentView = hosting
-        win.isOpaque = false
-        win.backgroundColor = .clear
-        win.level = .floating // Above almost everything
-        win.hasShadow = true
-        win.ignoresMouseEvents = false // Must be false to allow button clicks
-        win.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        
-        self.window = win
+        hosting.frame = NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight)
+        if #available(macOS 13.0, *) {
+            hosting.sizingOptions = []
+        }
+        panel.contentView = hosting
+                panel.contentView = hosting
+                NSLayoutConstraint.activate([
+                    hosting.widthAnchor.constraint(equalToConstant: panelWidth),
+                    hosting.heightAnchor.constraint(equalToConstant: panelHeight),
+                ])
+
+                self.panel = panel
     }
-    
-    func show(suggestion: String, selectedText: String, near cgRect: CGRect) {
-    Self.currentSuggestion = suggestion
-    viewModel.suggestion   = suggestion
-    viewModel.selectedText = selectedText
 
-    guard let window = window,
-          let primaryScreen = NSScreen.screens.first else { return }
+    // MARK: - Show
 
-    let primaryHeight = primaryScreen.frame.height
-    let windowHeight: CGFloat = 450
+    /// `cgRect` is in CG global space (Y-down, origin = top-left of primary screen).
+    func show(suggestion: String, near cgRect: CGRect) {
+        Self.currentSuggestion  = suggestion
+        viewModel.suggestion    = suggestion
 
-    // CG → Cocoa Y-flip:
-    // cgRect.minY is pixels from top of primary screen (Y-down).
-    // Cocoa y of that same edge = primaryHeight - cgRect.minY.
-    // Place overlay so its bottom aligns just above the selection's top edge.
-    let x = cgRect.minX
-    let y = (primaryHeight - cgRect.minY) - windowHeight - 10
+        guard let panel = panel,
+              let primaryScreen = NSScreen.screens.first else { return }
 
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    window.setFrame(NSRect(x: x, y: y, width: 280, height: windowHeight), display: false)
-    CATransaction.commit()
+        let primaryHeight = primaryScreen.frame.height
 
-    // orderFront — not makeKeyAndOrderFront — preserves focus in host text field.
-    window.orderFront(nil)
-}
-    
+        // CG → Cocoa Y-flip:
+        // Cocoa y of the selection's top edge = primaryHeight - cgRect.minY
+        // Place the ghost text pill so its bottom sits just above the selection.
+        let x = cgRect.minX
+        let y = (primaryHeight - cgRect.minY) + 4   // 4pt gap above the text baseline
+
+        // Zero-tearing: suppress implicit CA position animation
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // display: false — never force a synchronous display inside show().
+        // Triggering display:true during an AppKit layout pass is what causes
+        // _postWindowNeedsUpdateConstraints to throw (frames 3-5 in the crash log).
+        panel.setFrame(
+            NSRect(x: x, y: y, width: panelWidth, height: panelHeight),
+            display: false
+        )
+        CATransaction.commit()
+
+        // orderFront, not makeKeyAndOrderFront — preserves key window in host app.
+        if !panel.isVisible {
+            panel.orderFront(nil)
+        }
+    }
+
+    // MARK: - Hide
+
     func hide() {
-        window?.orderOut(nil)
+        panel?.orderOut(nil)
+        viewModel.suggestion   = ""
+        Self.currentSuggestion = nil
     }
 }
 
-// MARK: - Main View
+// MARK: - Ghost Text View
+// Intentionally minimal — fixed height, no conditional branches that change layout.
+
 struct GhostOverlayView: View {
     @ObservedObject var viewModel: GhostOverlayViewModel
-    
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            // Section 1: The "Ghost" Suggestion / Caret
-            HStack(spacing: 4) {
-                Text("⎸").foregroundColor(.blue).bold()
-                Text(viewModel.suggestion)
-                    .foregroundColor(.secondary)
-                    .italic()
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color.black.opacity(0.2))
-            .cornerRadius(4)
-            
-            // Section 2: The Action List (The FAB)
-            if !viewModel.selectedText.isEmpty {
-                VStack(spacing: 0) {
-                    ScrollView(.vertical, showsIndicators: false) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            ForEach(UserAction.defaults) { action in
-                                ActionButton(action: action, viewModel: viewModel)
-                            }
-                        }
-                        .padding(4)
-                    }
-                }
-               // .frame(width: 200, maxHeight: 280) // Prevents truncation
-                .frame(width: 200)
-                .frame(maxHeight: 280)
-                .background(VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow))
-                .cornerRadius(10)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+        HStack(spacing: 6) {
+            Text("⎸")
+                .foregroundColor(.blue)
+                .bold()
+
+            Text(viewModel.suggestion)
+                .foregroundColor(.secondary)
+                .italic()
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 0)
+
+            Text("⇥")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundColor(.secondary.opacity(0.7))
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.white.opacity(0.1))
                 )
-                .shadow(radius: 15)
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
         }
-        .padding(10)
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: viewModel.selectedText)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5)
+        )
     }
 }
 
-// MARK: - Subviews
-struct ActionButton: View {
-    let action: UserAction
-    @ObservedObject var viewModel: GhostOverlayViewModel
-    @State private var isHovered = false
-    
-    var body: some View {
-        Button(action: runAction) {
-            HStack(spacing: 8) {
-                Image(systemName: action.iconName)
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 16)
-                
-                Text(action.title)
-                    .font(.system(size: 12, weight: .medium))
-                
-                Spacer()
-                
-                if let shortcut = action.shortcut {
-                    Text(shortcut.uppercased())
-                        .font(.system(size: 9, weight: .bold))
-                        .padding(.horizontal, 4)
-                        .background(Color.white.opacity(0.1))
-                        .cornerRadius(3)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .contentShape(Rectangle())
-            .background(isHovered ? Color.blue.opacity(0.8) : Color.clear)
-            .foregroundColor(isHovered ? .white : .primary)
-            .cornerRadius(6)
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
-        .disabled(viewModel.isProcessing)
-    }
-    
-    private func runAction() {
-        guard !viewModel.isProcessing else { return }
-        viewModel.isProcessing = true
-        
-        Task {
-            let result = await InferenceManager.shared.transform(
-                selectedText: viewModel.selectedText,
-                action: action
-            )
-            
-            await MainActor.run {
-                viewModel.isProcessing = false
-                if let finalResult = result {
-                    // CRITICAL: Hide our app so focus returns to the original text field
-                    NSApp.hide(nil)
-                    
-                    // Small delay to ensure the OS completes the focus switch
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                        AccessibilityObserver.shared.injectTransformResult(finalResult)
-                    }
-                }
-            }
-        }
-    }
-}
+// MARK: - VisualEffectView (kept for FABWindowController use)
 
-// MARK: - Helpers
 struct VisualEffectView: NSViewRepresentable {
     let material: NSVisualEffectView.Material
     let blendingMode: NSVisualEffectView.BlendingMode
-    
+
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
-        view.material = material
+        view.material    = material
         view.blendingMode = blendingMode
-        view.state = .active
+        view.state       = .active
         return view
     }
-    
+
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
+
+// MARK: - Notifications
 
 extension Notification.Name {
     static let fabActionCompleted = Notification.Name("com.luminatext.fabActionCompleted")

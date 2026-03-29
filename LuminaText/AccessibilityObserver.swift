@@ -1,13 +1,14 @@
-    
 import AppKit
 import ApplicationServices
 
 // MARK: - TextContext
 
+// MARK: - TextContext
 struct TextContext {
     let textBeforeCursor: String
     let selectedText: String
     let appBundleID: String
+    
     /// FIM prompt ready for direct injection into the backend.
     /// Format: <|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>
     /// Empty when there is no text after the cursor (falls back to plain completion).
