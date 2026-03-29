@@ -1,38 +1,33 @@
+// ═══════════════════════════════════════════════════════════
+// SettingsView.swift
+// ═══════════════════════════════════════════════════════════
 import SwiftUI
 import AppKit
 
 struct SettingsView: View {
-    @ObservedObject private var settings = AppSettings.shared
-    @ObservedObject private var inference = InferenceManager.shared
     @State private var selectedTab = 0
-
     var body: some View {
         TabView(selection: $selectedTab) {
             GeneralTab()
                 .tabItem { Label("General", systemImage: "gearshape") }
                 .tag(0)
-
             ModelTab()
                 .tabItem { Label("Model", systemImage: "cpu") }
                 .tag(1)
-
             ActionsTab()
                 .tabItem { Label("Actions", systemImage: "bolt") }
                 .tag(2)
-
             AppearanceTab()
                 .tabItem { Label("Appearance", systemImage: "paintbrush") }
                 .tag(3)
-
             HotkeysTab()
                 .tabItem { Label("Hotkeys", systemImage: "keyboard") }
                 .tag(4)
-
             AboutTab()
                 .tabItem { Label("About", systemImage: "info.circle") }
                 .tag(5)
         }
-        .frame(width: 520, height: 420)
+        .frame(width: 560, height: 440)
         .padding()
     }
 }
@@ -40,40 +35,22 @@ struct SettingsView: View {
 // MARK: - General Tab
 
 struct GeneralTab: View {
-    @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var s = AppSettings.shared
 
     var body: some View {
         Form {
             Section("Behavior") {
-                Toggle("Enable completions", isOn: $settings.isEnabled)
-
-                HStack(spacing: 12) {
-                    Text("Trigger delay")
-                        .frame(width: 100, alignment: .leading)
-                    Slider(value: $settings.triggerDelay, in: 0.1...2.0, step: 0.1)
-                    Text(String(format: "%.1fs", settings.triggerDelay))
-                        .frame(width: 38)
-                        .foregroundColor(.secondary)
-                        .monospacedDigit()
-                }
-
-                HStack(spacing: 12) {
-                    Text("Max tokens")
-                        .frame(width: 100, alignment: .leading)
-                    Slider(value: Binding(
-                        get: { Double(settings.maxTokens) },
-                        set: { settings.maxTokens = Int($0) }
-                    ), in: 10...200, step: 5)
-                    Text("\(settings.maxTokens)")
-                        .frame(width: 38)
-                        .foregroundColor(.secondary)
-                        .monospacedDigit()
-                }
+                Toggle("Enable completions", isOn: $s.isEnabled)
+                sliderRow("Trigger delay", value: $s.triggerDelay, range: 0.1...2.0, step: 0.1,
+                          format: { String(format: "%.1fs", $0) })
+                sliderRow("Max tokens",
+                          value: Binding(get: { Double(s.maxTokens) }, set: { s.maxTokens = Int($0) }),
+                          range: 10...200, step: 5, format: { "\(Int($0))" })
             }
 
             Section("Shortcuts") {
-                shortcutRow(label: "Accept suggestion", keys: "⇥ Tab")
-                shortcutRow(label: "Dismiss suggestion", keys: "Esc")
+                shortcutRow("Accept suggestion", label: s.acceptHotkey.label)
+                shortcutRow("Dismiss suggestion", label: s.dismissHotkey.label)
             }
 
             Section("Permissions") {
@@ -86,27 +63,31 @@ struct GeneralTab: View {
                         Button("Open Settings") {
                             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
+                        .buttonStyle(.borderedProminent).controlSize(.small)
                     }
                 }
             }
         }
         .formStyle(.grouped)
-        .padding(.horizontal, 8)
     }
 
     @ViewBuilder
-    private func shortcutRow(label: String, keys: String) -> some View {
+    private func sliderRow(_ label: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double, format: @escaping (Double) -> String) -> some View {
+        HStack(spacing: 12) {
+            Text(label).frame(width: 100, alignment: .leading)
+            Slider(value: value, in: range, step: step)
+            Text(format(value.wrappedValue)).frame(width: 42).foregroundColor(.secondary).monospacedDigit()
+        }
+    }
+
+    @ViewBuilder
+    private func shortcutRow(_ label: String, label badge: String) -> some View {
         HStack {
-            Image(systemName: "keyboard")
-                .foregroundColor(.secondary)
-                .frame(width: 18)
+            Image(systemName: "keyboard").foregroundColor(.secondary).frame(width: 18)
             Text(label)
             Spacer()
-            Text(keys)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
+            Text(badge)
+                .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(Color(.controlBackgroundColor))
                 .cornerRadius(5)
                 .font(.system(size: 12, design: .monospaced))
@@ -117,7 +98,7 @@ struct GeneralTab: View {
 // MARK: - Model Tab
 
 struct ModelTab: View {
-    @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var s = AppSettings.shared
     @ObservedObject private var inference = InferenceManager.shared
     @State private var testOutput = ""
     @State private var isTesting = false
@@ -126,72 +107,62 @@ struct ModelTab: View {
         Form {
             Section("Active Backend") {
                 HStack(spacing: 8) {
-                    Circle()
-                        .fill(inference.isReady ? Color.green : Color.orange)
-                        .frame(width: 8, height: 8)
+                    Circle().fill(inference.isReady ? Color.green : Color.orange).frame(width: 8, height: 8)
                     Text(inference.backendName)
-                        .foregroundColor(.primary)
                     Spacer()
-                    if inference.isGenerating {
-                        ProgressView().controlSize(.small)
-                    }
+                    if inference.isGenerating { ProgressView().controlSize(.small) }
                 }
             }
 
-            Section("MLX (Local)") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Model: mlx-community/Qwen2.5-Coder-0.5B-Instruct-4bit")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text("Add the mlx-swift-examples package to your Xcode project to enable MLX inference. The app auto-detects and prefers MLX over Ollama.")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.vertical, 2)
-            }
-
-            Section("Ollama (Fallback)") {
+            Section("Ollama") {
                 LabeledContent("Host") {
-                    TextField("http://localhost:11434", text: $settings.ollamaHost)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 220)
+                    TextField("http://localhost:11434", text: $s.ollamaHost)
+                        .textFieldStyle(.roundedBorder).frame(width: 220)
                 }
                 LabeledContent("Model") {
-                    TextField("qwen2.5-coder:0.5b", text: $settings.ollamaModel)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 220)
+                    TextField("qwen2.5-coder:0.5b", text: $s.ollamaModel)
+                        .textFieldStyle(.roundedBorder).frame(width: 220)
                 }
                 HStack(spacing: 12) {
-                    Text("Temperature")
-                        .frame(width: 100, alignment: .leading)
-                    Slider(value: $settings.temperature, in: 0...1, step: 0.05)
-                    Text(String(format: "%.2f", settings.temperature))
-                        .frame(width: 38)
-                        .foregroundColor(.secondary)
-                        .monospacedDigit()
+                    Text("Temperature").frame(width: 100, alignment: .leading)
+                    Slider(value: $s.temperature, in: 0...1, step: 0.05)
+                    Text(String(format: "%.2f", s.temperature)).frame(width: 42).foregroundColor(.secondary).monospacedDigit()
+                }
+            }
+
+            Section("LM Studio") {
+                LabeledContent("Host") {
+                    TextField("http://localhost:1234/v1", text: $s.lmStudioHost)
+                        .textFieldStyle(.roundedBorder).frame(width: 220)
+                }
+                LabeledContent("Model") {
+                    TextField("model-id", text: $s.lmStudioModel)
+                        .textFieldStyle(.roundedBorder).frame(width: 220)
                 }
             }
 
             Section("System Prompt") {
-                TextEditor(text: $settings.systemPrompt)
+                Picker("Mode", selection: $s.inferenceMode) {
+                    ForEach(InferenceMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+                }
+                .pickerStyle(.segmented)
+                TextEditor(text: $s.systemPrompt)
                     .font(.system(size: 12, design: .monospaced))
-                    .frame(height: 120)
+                    .frame(height: 100)
                     .scrollContentBackground(.hidden)
                     .background(Color(.textBackgroundColor))
                     .cornerRadius(6)
-
-                Text("Changes apply instantly. Keep the prompt concise (≤ 200 tokens).")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                HStack {
+                    Button("Reset to default") { s.resetSystemPrompt() }.controlSize(.small)
+                    Spacer()
+                    Text("≤ 200 tokens recommended").font(.caption2).foregroundColor(.secondary)
+                }
             }
 
             Section("Test") {
                 HStack(alignment: .top, spacing: 10) {
-                    Button("Run test completion") { runTest() }
-                        .disabled(isTesting || !inference.isReady)
-                    if isTesting {
-                        ProgressView().controlSize(.small)
-                    }
+                    Button("Run test completion") { runTest() }.disabled(isTesting || !inference.isReady)
+                    if isTesting { ProgressView().controlSize(.small) }
                 }
                 if !testOutput.isEmpty {
                     Text(testOutput)
@@ -205,42 +176,45 @@ struct ModelTab: View {
             }
         }
         .formStyle(.grouped)
-        .padding(.horizontal, 8)
     }
 
     private func runTest() {
-        isTesting = true
-        testOutput = ""
+        isTesting = true; testOutput = ""
         Task {
             let result = await InferenceManager.shared.complete(prompt: "func fibonacci(n: Int) -> Int {")
-            await MainActor.run {
-                testOutput = result ?? "(no result)"
-                isTesting = false
-            }
+            testOutput = result ?? "(no result)"
+            isTesting = false
         }
     }
 }
 
 // MARK: - Actions Tab
 
+// UserAction must be Hashable for List selection — extend here (id-based)
+extension UserAction: Hashable {
+    static func == (lhs: UserAction, rhs: UserAction) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+}
+
 struct ActionsTab: View {
-    @ObservedObject private var settings = AppSettings.shared
-    @State private var selectedAction: UserAction? = nil
-    @State private var isEditing = false
-    @State private var isCreating = false
+    @ObservedObject private var s = AppSettings.shared
+    @State private var selectedID: UUID? = nil
+    @State private var showingNew = false
+
+    private var selectedIndex: Int? {
+        guard let id = selectedID else { return nil }
+        return s.userActions.firstIndex(where: { $0.id == id })
+    }
 
     var body: some View {
         HSplitView {
-            // Left — list
+            // Left sidebar
             VStack(spacing: 0) {
-                List(settings.userActions, id: \.id, selection: $selectedAction) { action in
-                    HStack(spacing: 10) {
-                        Image(systemName: action.sfSymbol)
-                            .frame(width: 18)
-                            .foregroundColor(.accentColor)
+                List(s.userActions, id: \.id, selection: $selectedID) { action in
+                    HStack(spacing: 8) {
+                        Image(systemName: action.iconName).frame(width: 16).foregroundColor(.accentColor)
                         Text(action.title)
                     }
-                    .tag(action)
                     .padding(.vertical, 2)
                 }
                 .listStyle(.sidebar)
@@ -248,76 +222,45 @@ struct ActionsTab: View {
                 Divider()
 
                 HStack(spacing: 0) {
-                    Button {
-                        isCreating = true
-                    } label: {
-                        Image(systemName: "plus")
-                            .frame(width: 28, height: 24)
+                    Button { showingNew = true } label: {
+                        Image(systemName: "plus").frame(width: 28, height: 24)
                     }
                     .buttonStyle(.plain)
 
                     Button {
-                        guard let sel = selectedAction,
-                              let idx = settings.userActions.firstIndex(where: { $0.id == sel.id })
-                        else { return }
-                        settings.userActions.remove(at: idx)
-                        selectedAction = nil
+                        guard let idx = selectedIndex else { return }
+                        s.userActions.remove(at: idx)
+                        selectedID = nil
                     } label: {
-                        Image(systemName: "minus")
-                            .frame(width: 28, height: 24)
+                        Image(systemName: "minus").frame(width: 28, height: 24)
                     }
                     .buttonStyle(.plain)
-                    .disabled(selectedAction == nil)
+                    .disabled(selectedIndex == nil)
 
                     Spacer()
 
-                    Button("Import") {
-                        print("[ActionsTab] Import stub — not yet implemented")
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .padding(.trailing, 8)
-
-                    Button("Export") {
-                        print("[ActionsTab] Export stub — not yet implemented")
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .padding(.trailing, 8)
+                    Button("Import") { print("[Actions] Import stub") }
+                        .buttonStyle(.plain).font(.system(size: 11)).foregroundColor(.secondary).padding(.trailing, 8)
+                    Button("Export") { print("[Actions] Export stub") }
+                        .buttonStyle(.plain).font(.system(size: 11)).foregroundColor(.secondary).padding(.trailing, 8)
                 }
-                .padding(.vertical, 4)
-                .padding(.horizontal, 4)
+                .padding(.vertical, 4).padding(.horizontal, 4)
                 .background(Color(.controlBackgroundColor))
             }
             .frame(minWidth: 160, maxWidth: 200)
 
-            // Right — editor
+            // Right editor
             Group {
-                if let sel = selectedAction,
-                   let idx = settings.userActions.firstIndex(where: { $0.id == sel.id }) {
-                    ActionEditorView(
-                        action: $settings.userActions[idx],
-                        onDone: { selectedAction = settings.userActions[idx] }
-                    )
+                if let idx = selectedIndex {
+                    ActionEditorView(action: $s.userActions[idx])
                 } else {
-                    VStack {
-                        Spacer()
-                        Text("Select an action to edit")
-                            .foregroundColor(.secondary)
-                            .font(.callout)
-                        Spacer()
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    VStack { Spacer(); Text("Select an action to edit").foregroundColor(.secondary); Spacer() }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }
-        .sheet(isPresented: $isCreating) {
-            NewActionSheet { newAction in
-                settings.userActions.append(newAction)
-                selectedAction = newAction
-            }
+        .sheet(isPresented: $showingNew) {
+            NewActionSheet { s.userActions.append($0); selectedID = $0.id }
         }
     }
 }
@@ -326,31 +269,20 @@ struct ActionsTab: View {
 
 struct ActionEditorView: View {
     @Binding var action: UserAction
-    var onDone: () -> Void
-
     @State private var showSymbolPicker = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            // Title + icon row
             HStack(spacing: 12) {
-                Button {
-                    showSymbolPicker = true
-                } label: {
+                Button { showSymbolPicker = true } label: {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.accentColor.opacity(0.15))
-                            .frame(width: 40, height: 40)
-                        Image(systemName: action.sfSymbol)
-                            .font(.system(size: 18))
-                            .foregroundColor(.accentColor)
+                        RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.15)).frame(width: 40, height: 40)
+                        Image(systemName: action.iconName).font(.system(size: 18)).foregroundColor(.accentColor)
                     }
                 }
                 .buttonStyle(.plain)
-                .help("Pick icon")
                 .popover(isPresented: $showSymbolPicker, arrowEdge: .bottom) {
-                    SFSymbolPickerView(selected: $action.sfSymbol)
-                        .frame(width: 280, height: 280)
+                    SFSymbolPickerView(selected: $action.iconName).frame(width: 280, height: 280)
                 }
 
                 TextField("Action title", text: $action.title)
@@ -361,21 +293,14 @@ struct ActionEditorView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Instruction Prompt")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .textCase(.uppercase)
-
-                TextEditor(text: $action.prompt)
+                Text("INSTRUCTION PROMPT").font(.caption).foregroundColor(.secondary)
+                TextEditor(text: $action.systemPrompt)
                     .font(.system(size: 12, design: .monospaced))
                     .frame(minHeight: 120)
                     .scrollContentBackground(.hidden)
                     .background(Color(.textBackgroundColor))
                     .cornerRadius(6)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .strokeBorder(Color(.separatorColor), lineWidth: 0.5)
-                    )
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(.separatorColor), lineWidth: 0.5))
             }
 
             Spacer()
@@ -393,60 +318,44 @@ struct NewActionSheet: View {
 
     @State private var title = ""
     @State private var prompt = ""
-    @State private var sfSymbol = "sparkles"
+    @State private var iconName = "sparkles"
     @State private var showSymbolPicker = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("New Action")
-                .font(.headline)
+            Text("New Action").font(.headline)
 
             HStack(spacing: 12) {
-                Button {
-                    showSymbolPicker = true
-                } label: {
+                Button { showSymbolPicker = true } label: {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.accentColor.opacity(0.15))
-                            .frame(width: 40, height: 40)
-                        Image(systemName: sfSymbol)
-                            .font(.system(size: 18))
-                            .foregroundColor(.accentColor)
+                        RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.15)).frame(width: 40, height: 40)
+                        Image(systemName: iconName).font(.system(size: 18)).foregroundColor(.accentColor)
                     }
                 }
                 .buttonStyle(.plain)
                 .popover(isPresented: $showSymbolPicker, arrowEdge: .bottom) {
-                    SFSymbolPickerView(selected: $sfSymbol)
-                        .frame(width: 280, height: 280)
+                    SFSymbolPickerView(selected: $iconName).frame(width: 280, height: 280)
                 }
 
-                TextField("Title", text: $title)
-                    .textFieldStyle(.roundedBorder)
+                TextField("Title", text: $title).textFieldStyle(.roundedBorder)
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Instruction Prompt")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                Text("Instruction Prompt").font(.caption).foregroundColor(.secondary)
                 TextEditor(text: $prompt)
                     .font(.system(size: 12, design: .monospaced))
                     .frame(height: 100)
                     .scrollContentBackground(.hidden)
                     .background(Color(.textBackgroundColor))
                     .cornerRadius(6)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .strokeBorder(Color(.separatorColor), lineWidth: 0.5)
-                    )
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(.separatorColor), lineWidth: 0.5))
             }
 
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Create") {
-                    let action = UserAction(title: title, prompt: prompt, sfSymbol: sfSymbol)
-                    onCreate(action)
+                    onCreate(UserAction(title: title, systemPrompt: prompt, iconName: iconName))
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -458,56 +367,38 @@ struct NewActionSheet: View {
     }
 }
 
-// MARK: - SFSymbolPickerView
+// MARK: - SF Symbol Picker
 
 private let pickerSymbols: [String] = [
-    "sparkles", "wand.and.stars", "bolt", "bolt.fill",
-    "textformat.abc", "pencil", "pencil.and.scribble", "doc.text",
-    "arrow.down.right.and.arrow.up.left", "arrow.up.right.and.arrow.down.left",
-    "briefcase", "briefcase.fill",
-    "questionmark.circle", "questionmark.circle.fill",
-    "lightbulb", "lightbulb.fill",
-    "checkmark.circle", "checkmark.circle.fill",
-    "xmark.circle", "exclamationmark.circle",
-    "bubble.left.and.bubble.right", "bubble.left",
-    "magnifyingglass", "text.magnifyingglass",
-    "globe", "network",
-    "cpu", "memorychip",
-    "paintbrush", "paintbrush.fill",
-    "scissors", "scissors.badge.ellipsis",
-    "arrow.triangle.2.circlepath", "repeat",
-    "waveform", "function",
+    "sparkles","wand.and.stars","bolt","bolt.fill",
+    "textformat.abc","text.badge.checkmark","pencil","pencil.and.scribble",
+    "doc.plaintext","doc.text","arrow.down.right.and.arrow.up.left",
+    "arrow.up.right.and.arrow.down.left","briefcase","briefcase.fill",
+    "questionmark.circle","questionmark.circle.fill","lightbulb","lightbulb.fill",
+    "checkmark.circle","bubble.left.and.bubble.right","bubble.left",
+    "list.bullet","face.smiling","wand.and.stars.inverse",
+    "magnifyingglass","text.magnifyingglass","globe","cpu",
+    "paintbrush","scissors","arrow.triangle.2.circlepath","function",
 ]
 
 struct SFSymbolPickerView: View {
     @Binding var selected: String
-
     private let columns = Array(repeating: GridItem(.fixed(44)), count: 6)
 
     var body: some View {
         VStack(spacing: 0) {
-            Text("Choose Icon")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .padding(.top, 10)
-                .padding(.bottom, 6)
-
+            Text("Choose Icon").font(.caption).foregroundColor(.secondary).padding(.vertical, 8)
             Divider()
-
             ScrollView {
                 LazyVGrid(columns: columns, spacing: 4) {
-                    ForEach(pickerSymbols, id: \.self) { symbol in
-                        Button {
-                            selected = symbol
-                        } label: {
-                            Image(systemName: symbol)
+                    ForEach(pickerSymbols, id: \.self) { sym in
+                        Button { selected = sym } label: {
+                            Image(systemName: sym)
                                 .font(.system(size: 17))
                                 .frame(width: 36, height: 36)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(selected == symbol ? Color.accentColor.opacity(0.2) : Color.clear)
-                                )
-                                .foregroundColor(selected == symbol ? .accentColor : .primary)
+                                .background(RoundedRectangle(cornerRadius: 6)
+                                    .fill(selected == sym ? Color.accentColor.opacity(0.2) : Color.clear))
+                                .foregroundColor(selected == sym ? .accentColor : .primary)
                         }
                         .buttonStyle(.plain)
                     }
@@ -521,45 +412,34 @@ struct SFSymbolPickerView: View {
 // MARK: - Appearance Tab
 
 struct AppearanceTab: View {
-    @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var s = AppSettings.shared
 
     var body: some View {
         Form {
             Section("Ghost Text Overlay") {
                 HStack(spacing: 12) {
-                    Text("Opacity")
-                        .frame(width: 60, alignment: .leading)
-                    Slider(value: $settings.overlayOpacity, in: 0.2...1.0, step: 0.05)
-                    Text(String(format: "%.0f%%", settings.overlayOpacity * 100))
-                        .frame(width: 40)
-                        .foregroundColor(.secondary)
-                        .monospacedDigit()
+                    Text("Opacity").frame(width: 60, alignment: .leading)
+                    Slider(value: $s.overlayOpacity, in: 0.2...1.0, step: 0.05)
+                    Text(String(format: "%.0f%%", s.overlayOpacity * 100))
+                        .frame(width: 40).foregroundColor(.secondary).monospacedDigit()
                 }
             }
 
             Section("Preview") {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(.textBackgroundColor))
-                        .frame(height: 80)
+                    RoundedRectangle(cornerRadius: 8).fill(Color(.textBackgroundColor)).frame(height: 80)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("func fetchUser(id: String) ")
-                            .font(.system(size: 13, design: .monospaced))
+                        Text("func fetchUser(id: String) ").font(.system(size: 13, design: .monospaced))
                         HStack(spacing: 6) {
                             Text("async throws -> User {")
                                 .font(.system(size: 13, design: .monospaced))
-                                .foregroundColor(.white.opacity(settings.overlayOpacity * 0.8))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(.ultraThinMaterial)
-                                )
+                                .foregroundColor(.white.opacity(s.overlayOpacity * 0.8))
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(RoundedRectangle(cornerRadius: 6).fill(.ultraThinMaterial))
                             Text("⇥")
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundColor(.white.opacity(0.5))
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 2)
+                                .padding(.horizontal, 5).padding(.vertical, 2)
                                 .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.1)))
                         }
                     }
@@ -569,71 +449,53 @@ struct AppearanceTab: View {
 
             Section("Theme") {
                 HStack(spacing: 8) {
-                    Image(systemName: "circle.lefthalf.filled")
-                        .foregroundColor(.secondary)
-                    Text("Follows system appearance automatically")
-                        .foregroundColor(.secondary)
-                        .font(.callout)
+                    Image(systemName: "circle.lefthalf.filled").foregroundColor(.secondary)
+                    Text("Follows system appearance automatically").foregroundColor(.secondary).font(.callout)
                 }
-                .padding(.vertical, 2)
             }
         }
         .formStyle(.grouped)
-        .padding(.horizontal, 8)
     }
 }
 
 // MARK: - Hotkeys Tab
 
 struct HotkeysTab: View {
-    @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var s = AppSettings.shared
 
-    // Maps key-code → readable label for the subset we care about
-    private static let keyLabels: [(code: Int, label: String)] = [
-        (48,  "Tab (⇥)"),
-        (36,  "Return (↩)"),
-        (49,  "Space"),
-        (53,  "Escape"),
-        (122, "F1"),
-        (120, "F2"),
-        (99,  "F3"),
-        (118, "F4"),
-        (96,  "F5"),
-        (97,  "F6"),
+    private static let keyOptions: [(code: Int, label: String)] = [
+        (48, "Tab (⇥)"), (36, "Return (↩)"), (49, "Space"),
+        (53, "Escape"), (122, "F1"), (120, "F2"), (99, "F3"), (118, "F4"),
     ]
 
     var body: some View {
         Form {
             Section("Keyboard Shortcuts") {
                 LabeledContent("Accept suggestion") {
-                    Picker("", selection: $settings.acceptHotkeyCode) {
-                        ForEach(Self.keyLabels, id: \.code) { pair in
-                            Text(pair.label).tag(pair.code)
-                        }
+                    Picker("", selection: $s.acceptHotkey.keyCode) {
+                        ForEach(Self.keyOptions, id: \.code) { o in Text(o.label).tag(o.code) }
                     }
-                    .labelsHidden()
-                    .frame(width: 160)
+                    .labelsHidden().frame(width: 160)
                 }
-
                 LabeledContent("Dismiss suggestion") {
-                    Picker("", selection: $settings.dismissHotkeyCode) {
-                        ForEach(Self.keyLabels, id: \.code) { pair in
-                            Text(pair.label).tag(pair.code)
-                        }
+                    Picker("", selection: $s.dismissHotkey.keyCode) {
+                        ForEach(Self.keyOptions, id: \.code) { o in Text(o.label).tag(o.code) }
                     }
-                    .labelsHidden()
-                    .frame(width: 160)
+                    .labelsHidden().frame(width: 160)
+                }
+                LabeledContent("Manual trigger") {
+                    Picker("", selection: $s.manualTriggerHotkey.keyCode) {
+                        ForEach(Self.keyOptions, id: \.code) { o in Text(o.label).tag(o.code) }
+                    }
+                    .labelsHidden().frame(width: 160)
                 }
             }
-
             Section {
-                Text("Changing these remaps the Accept/Dismiss keys inside LuminaText. Conflicts with system shortcuts are not checked automatically.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                Text("Key conflicts with system shortcuts are not checked automatically.")
+                    .font(.caption).foregroundColor(.secondary)
             }
         }
         .formStyle(.grouped)
-        .padding(.horizontal, 8)
     }
 }
 
@@ -644,36 +506,27 @@ struct AboutTab: View {
         VStack(spacing: 20) {
             Image(systemName: "text.cursor")
                 .font(.system(size: 48))
-                .foregroundStyle(
-                    LinearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing)
-                )
+                .foregroundStyle(LinearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
 
             VStack(spacing: 4) {
-                Text("LuminaText")
-                    .font(.system(size: 22, weight: .bold))
-                Text("System-wide LLM Autocompletion")
-                    .foregroundColor(.secondary)
-                Text("Version 1.0.0")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                Text("LuminaText").font(.system(size: 22, weight: .bold))
+                Text("System-wide LLM Autocompletion").foregroundColor(.secondary)
+                Text("Version 1.0.0").font(.caption).foregroundColor(.secondary)
             }
 
             Divider()
 
             VStack(alignment: .leading, spacing: 10) {
-                FeatureRow(icon: "cpu", title: "MLX Inference", description: "Runs Qwen2.5-Coder-0.5B locally via mlx-swift")
-                FeatureRow(icon: "server.rack", title: "Ollama Fallback", description: "Seamlessly falls back to Ollama if MLX unavailable")
-                FeatureRow(icon: "accessibility", title: "System-wide", description: "Works in any app via Accessibility API")
-                FeatureRow(icon: "keyboard", title: "Ghost Text", description: "Press Tab to accept • Esc to dismiss")
-                FeatureRow(icon: "bolt", title: "Actions FAB", description: "Select text anywhere to transform it with AI")
+                FeatureRow(icon: "cpu",           title: "MLX / Ollama / LMStudio", description: "Local inference, zero cloud required")
+                FeatureRow(icon: "accessibility", title: "System-wide",             description: "Works in any app via Accessibility API")
+                FeatureRow(icon: "keyboard",      title: "Ghost Text",              description: "Press Tab to accept • Esc to dismiss")
+                FeatureRow(icon: "bolt",          title: "Actions FAB",             description: "Select text anywhere to transform with AI")
             }
             .padding(.horizontal, 20)
 
             Spacer()
-
             Link("View on GitHub", destination: URL(string: "https://github.com")!)
-                .foregroundColor(.accentColor)
-                .font(.caption)
+                .foregroundColor(.accentColor).font(.caption)
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -681,15 +534,10 @@ struct AboutTab: View {
 }
 
 struct FeatureRow: View {
-    let icon: String
-    let title: String
-    let description: String
-
+    let icon: String; let title: String; let description: String
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: icon)
-                .frame(width: 20)
-                .foregroundColor(.accentColor)
+            Image(systemName: icon).frame(width: 20).foregroundColor(.accentColor)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).fontWeight(.medium)
                 Text(description).font(.caption).foregroundColor(.secondary)

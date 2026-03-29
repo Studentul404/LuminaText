@@ -1,3 +1,11 @@
+//
+//  MLXBackend.swift
+//  LuminaText
+//
+//  Created by Kirill on 28.03.2026.
+//
+
+
 import Foundation
 
 final class MLXBackend: InferenceBackend {

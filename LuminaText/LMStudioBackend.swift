@@ -48,7 +48,7 @@ final class LMStudioBackend: InferenceBackend {
                let message = choices.first?["message"] as? [String: Any],
                let content = message["content"] as? String {
                 
-                return content.trimmingCharacters(in: .whitespacesAndNewlines)
+                return content.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             }
         } catch {
             print("[LMStudioBackend] Error: \(error)")

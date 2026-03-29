@@ -1,7 +1,7 @@
 import Foundation
 
 final class OllamaBackend: InferenceBackend {
-    var displayName: String { "Ollama · \(AppSettings.shared.ollamaModel)" } // Renamed
+    var displayName: String { "Ollama · \(AppSettings.shared.ollamaModel)" }
 
     func ping() async -> Bool {
         guard let url = URL(string: "\(AppSettings.shared.ollamaHost)/api/tags") else {
@@ -25,21 +25,17 @@ final class OllamaBackend: InferenceBackend {
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
             
-            // Перевіряємо статус відповіді
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 print("[OllamaBackend] discoverModels: Invalid status code")
                 return []
             }
             
-            // Парсимо JSON
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                let modelsArray = json["models"] as? [[String: Any]] {
                 
-                // Витягуємо назви моделей (поле "name")
                 let modelNames = modelsArray.compactMap { modelDict in
                     modelDict["name"] as? String
                 }
-                
                 return modelNames
             }
         } catch {
@@ -50,8 +46,8 @@ final class OllamaBackend: InferenceBackend {
     }
 
     func complete(
-        prompt: String,           // не используется напрямую — нужен только для совместимости протокола
-        systemPrompt: String,     // ← сюда уже пришёл полностью собранный промпт с {{input}} заменённым
+        prompt: String,
+        systemPrompt: String,
         maxTokens: Int,
         temperature: Double
     ) async -> String? {
@@ -59,9 +55,11 @@ final class OllamaBackend: InferenceBackend {
             return nil
         }
 
+        let fullPrompt = systemPrompt.isEmpty ? prompt : "\(systemPrompt)\n\n\(prompt)"
+
         let body: [String: Any] = [
             "model": AppSettings.shared.ollamaModel,
-            "prompt": systemPrompt,     // ← весь контроль здесь, из настроек пользователя
+            "prompt": fullPrompt,
             "stream": false,
             "options": [
                 "num_predict": maxTokens,
@@ -81,7 +79,7 @@ final class OllamaBackend: InferenceBackend {
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                let responseText = json["response"] as? String {
                 
-                return responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                return responseText.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             }
         } catch {
             print("[OllamaBackend] Error: \(error)")

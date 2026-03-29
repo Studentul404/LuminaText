@@ -1,14 +1,14 @@
+// ═══════════════════════════════════════════════════════════
+// LuminaApp.swift
+// ═══════════════════════════════════════════════════════════
 import SwiftUI
 import AppKit
 
 @main
 struct LuminaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-
     var body: some Scene {
-        Settings {
-            SettingsView()
-        }
+        Settings { SettingsView() }
     }
 }
 
@@ -23,42 +23,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let accessibilityObserver = AccessibilityObserver.shared
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Hide dock icon — menu bar only
         NSApp.setActivationPolicy(.accessory)
-
-        // Sync with system appearance automatically
         NSApp.appearance = nil
 
         setupMenuBar()
         setupOverlay()
         requestAccessibilityPermissions()
 
-        // Mode A — autocomplete
         accessibilityObserver.onTextChanged = { [weak self] context, cursorRect in
-            guard let self else { return }
-            self.handleTextChange(context: context, cursorRect: cursorRect)
+            self?.handleTextChange(context: context, cursorRect: cursorRect)
         }
-
-        // Mode B — FAB on selection
         accessibilityObserver.onSelectionChanged = { [weak self] selectedText, rect in
-            guard let self else { return }
-            self.handleSelectionChange(selectedText: selectedText, rect: rect)
+            self?.handleSelectionChange(selectedText: selectedText, rect: rect)
         }
-
         accessibilityObserver.startObserving()
 
         NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(suggestionAccepted),
-            name: .suggestionAccepted,
-            object: nil
+            self, selector: #selector(suggestionAccepted),
+            name: .suggestionAccepted, object: nil
         )
-
         NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(fabActionCompleted(_:)),
-            name: .fabActionCompleted,
-            object: nil
+            self, selector: #selector(fabActionCompleted(_:)),
+            name: .fabActionCompleted, object: nil
         )
     }
 
@@ -66,7 +52,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "text.cursor", accessibilityDescription: "LuminaText")
             button.image?.isTemplate = true
@@ -76,15 +61,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "LuminaText", action: nil, keyEquivalent: ""))
         menu.addItem(.separator())
 
-        let statusMenuItem = NSMenuItem(title: "Status: Loading model…", action: nil, keyEquivalent: "")
-        statusMenuItem.tag = 100
-        menu.addItem(statusMenuItem)
-
+        let statusItem = NSMenuItem(title: "Status: Loading model…", action: nil, keyEquivalent: "")
+        statusItem.tag = 100
+        menu.addItem(statusItem)
         menu.addItem(.separator())
 
         let enableItem = NSMenuItem(title: "Enable Completions", action: #selector(toggleEnabled(_:)), keyEquivalent: "e")
         enableItem.target = self
-        enableItem.state = .on
+        enableItem.state = AppSettings.shared.isEnabled ? .on : .off
         enableItem.tag = 101
         menu.addItem(enableItem)
 
@@ -93,74 +77,61 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit LuminaText", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
-        statusItem?.menu = menu
+        self.statusItem?.menu = menu
 
         Task {
             await inferenceManager.loadModel()
-            await MainActor.run {
-                if let item = menu.item(withTag: 100) {
-                    item.title = inferenceManager.isReady
-                        ? "Status: Model ready ✓"
-                        : "Status: Using Ollama fallback"
-                }
+            if let item = menu.item(withTag: 100) {
+                item.title = inferenceManager.isReady ? "Status: Model ready ✓" : "Status: No backend available"
             }
         }
     }
-
-    // MARK: - Overlay
 
     private func setupOverlay() {
         overlayWindowController = OverlayWindowController()
         fabWindowController = FABWindowController()
     }
 
-    // MARK: - Text Handling (Mode A)
+    // MARK: - Text / Selection handling
 
     private func handleTextChange(context: TextContext, cursorRect: CGRect) {
         guard AppSettings.shared.isEnabled else { return }
         guard !context.textBeforeCursor.trimmingCharacters(in: .whitespaces).isEmpty else {
-            overlayWindowController?.hide()
-            return
+            overlayWindowController?.hide(); return
         }
-
         Task {
             let suggestion = await inferenceManager.complete(prompt: context.textBeforeCursor)
-            await MainActor.run {
-                if let suggestion, !suggestion.isEmpty {
-                    self.overlayWindowController?.show(suggestion: suggestion, near: cursorRect)
-                } else {
-                    self.overlayWindowController?.hide()
-                }
+            if let suggestion, !suggestion.isEmpty {
+                overlayWindowController?.show(
+                    suggestion: suggestion, 
+                    selectedText: "", // Добавьте этот аргумент
+                    near: cursorRect
+                )
+            } else {
+                overlayWindowController?.hide()
             }
         }
     }
 
-    // MARK: - Selection Handling (Mode B)
-
     private func handleSelectionChange(selectedText: String, rect: CGRect) {
-        guard AppSettings.shared.isEnabled else { return }
+    // 1. Скрываем старый GhostOverlay, если он мешает
+    overlayWindowController?.hide() 
 
-        if selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            fabWindowController?.hide()
-        } else {
-            fabWindowController?.show(selectedText: selectedText, near: rect)
-        }
+    // 2. Показываем только FAB
+    if !selectedText.isEmpty {
+        fabWindowController?.show(selectedText: selectedText, near: rect)
+    } else {
+        fabWindowController?.hide()
     }
-
-    // MARK: - FAB result injection
+}
 
     @objc private func fabActionCompleted(_ notification: Notification) {
-        guard let resultText = notification.object as? String, !resultText.isEmpty else { return }
+        guard let result = notification.object as? String, !result.isEmpty else { return }
         fabWindowController?.hide()
-        // Inject the transformed text via the accessibility observer's injection path
-        AccessibilityObserver.shared.injectTransformResult(resultText)
+        AccessibilityObserver.shared.injectTransformResult(result)
     }
 
-    @objc private func suggestionAccepted() {
-        overlayWindowController?.hide()
-    }
-
-    // MARK: - Actions
+    @objc private func suggestionAccepted() { overlayWindowController?.hide() }
 
     @objc private func toggleEnabled(_ sender: NSMenuItem) {
         AppSettings.shared.isEnabled.toggle()
@@ -173,30 +144,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openSettings() {
         if settingsWindow == nil {
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 520, height: 400),
+            let win = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
                 styleMask: [.titled, .closable, .miniaturizable],
-                backing: .buffered,
-                defer: false
+                backing: .buffered, defer: false
             )
-            window.title = "LuminaText Settings"
-            window.contentView = NSHostingView(rootView: SettingsView())
-            window.center()
-            window.isReleasedWhenClosed = false
-            settingsWindow = window
+            win.title = "LuminaText Settings"
+            win.contentView = NSHostingView(rootView: SettingsView())
+            win.center()
+            win.isReleasedWhenClosed = false
+            settingsWindow = win
         }
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    // MARK: - Accessibility
-
     private func requestAccessibilityPermissions() {
-        let options: [String: Any] = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-        let trusted = AXIsProcessTrustedWithOptions(options as CFDictionary)
-        if !trusted {
-            showAccessibilityAlert()
-        }
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        if !AXIsProcessTrustedWithOptions(opts) { showAccessibilityAlert() }
     }
 
     private func showAccessibilityAlert() {
@@ -206,14 +171,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Later")
-
         if alert.runModal() == .alertFirstButtonReturn {
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
         }
     }
 }
-
-// MARK: - NSMenuItem convenience
 
 extension NSMenu {
     @discardableResult
@@ -223,8 +185,4 @@ extension NSMenu {
         addItem(item)
         return item
     }
-}
-
-extension Notification.Name {
-    static let suggestionAccepted = Notification.Name("com.luminatext.suggestionAccepted")
 }

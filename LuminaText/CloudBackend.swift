@@ -1,7 +1,7 @@
 import Foundation
 
 final class CloudBackend: InferenceBackend {
-    let displayName: String // Renamed from 'name' to match protocol
+    let displayName: String
     private let provider: CloudProvider
     private let apiKey: String
     private let model: String
@@ -15,34 +15,28 @@ final class CloudBackend: InferenceBackend {
         self.displayName = "\(provider.rawValue) · \(model)"
     }
 
-    func ping() async -> Bool { // Added to satisfy protocol
+    func ping() async -> Bool {
         return await isAvailable()
     }
 
     func isAvailable() async -> Bool {
-        // 1. Очищаем базовый URL от лишних слешей
         let base = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        
-        // 2. Формируем эндпоинт
         let endpoint = provider == .anthropic ? "/messages" : "/models"
         guard let url = URL(string: base + endpoint) else { return false }
         
         var request = URLRequest(url: url)
         request.timeoutInterval = 5
         
-        // 3. Авторизация
         if provider == .anthropic {
             request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
             request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         } else {
-            // Обязательно Bearer, если LM Studio требует ключ
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
         
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             if let httpResponse = response as? HTTPURLResponse {
-                // ВАЖНО: добавьте этот принт, чтобы увидеть код ошибки в консоли Xcode!
                 print("[LuminaText] Server responded with: \(httpResponse.statusCode)")
                 return (200...299).contains(httpResponse.statusCode)
             }
@@ -53,21 +47,19 @@ final class CloudBackend: InferenceBackend {
     }
 
     func complete(
-            prompt: String,
-            systemPrompt: String,
-            maxTokens: Int,
-            temperature: Double // Added to match protocol
-        ) async -> String? {
+        prompt: String,
+        systemPrompt: String,
+        maxTokens: Int,
+        temperature: Double
+    ) async -> String? {
         
         if provider == .anthropic {
             return await completeAnthropic(prompt: prompt, systemPrompt: systemPrompt, maxTokens: maxTokens, temperature: temperature)
         } else {
             return await completeOpenAICompatible(prompt: prompt, systemPrompt: systemPrompt, maxTokens: maxTokens, temperature: temperature)
         }
-            return nil;
     }
 
-    // MARK: - OpenAI / Groq / OpenRouter / LM Studio
     private func completeOpenAICompatible(
         prompt: String,
         systemPrompt: String,
@@ -91,7 +83,6 @@ final class CloudBackend: InferenceBackend {
         return await sendRequest(url: url, body: body, isAnthropic: false)
     }
 
-    // MARK: - Anthropic
     private func completeAnthropic(
         prompt: String,
         systemPrompt: String,
@@ -112,7 +103,6 @@ final class CloudBackend: InferenceBackend {
         return await sendRequest(url: url, body: body, isAnthropic: true)
     }
 
-    // MARK: - Загальний HTTP запит
     private func sendRequest(url: URL, body: [String: Any], isAnthropic: Bool) async -> String? {
         do {
             var request = URLRequest(url: url)
@@ -134,13 +124,13 @@ final class CloudBackend: InferenceBackend {
                 if isAnthropic {
                     if let contentArray = json["content"] as? [[String: Any]],
                        let text = contentArray.first?["text"] as? String {
-                        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        return text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                     }
                 } else {
                     if let choices = json["choices"] as? [[String: Any]],
                        let message = choices.first?["message"] as? [String: Any],
                        let content = message["content"] as? String {
-                        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+                        return content.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                     }
                 }
             }
@@ -149,5 +139,4 @@ final class CloudBackend: InferenceBackend {
         }
         return nil
     }
-    
 }

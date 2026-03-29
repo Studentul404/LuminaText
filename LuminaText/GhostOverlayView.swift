@@ -1,300 +1,205 @@
 import SwiftUI
 import AppKit
+import Combine
 
-// MARK: - OverlayWindowController (Mode A — autocomplete ghost text)
-
+// MARK: - View Model
 @MainActor
-final class OverlayWindowController {
-    static var currentSuggestion: String?
-
-    private var window: NSWindow?
-    private var viewModel = GhostOverlayViewModel()
-
-    init() {
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 800, height: 100),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-
-        let hosting = NSHostingView(rootView: GhostOverlayView(viewModel: viewModel))
-        win.contentView = hosting
-        win.isOpaque = false
-        win.backgroundColor = .clear
-        win.level = .floating
-        win.ignoresMouseEvents = true
-        win.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        win.hasShadow = false
-
-        self.window = win
-    }
-
-    func show(suggestion: String, near rect: CGRect) {
-        Self.currentSuggestion = suggestion
-        viewModel.suggestion = suggestion
-
-        let screens = NSScreen.screens
-        let targetScreen = screens.first(where: { $0.frame.contains(rect.origin) }) ?? NSScreen.main ?? screens.first!
-        let screenFrame = targetScreen.frame
-
-        let windowWidth: CGFloat = 1000
-        let windowHeight: CGFloat = 100
-
-        let x = rect.minX
-        let y = screenFrame.maxY - rect.maxY - 5
-
-        let frame = CGRect(x: x, y: y - windowHeight, width: windowWidth, height: windowHeight)
-
-        viewModel.isVisible = true
-
-        if window?.frame.origin != frame.origin {
-            window?.setFrame(frame, display: true)
-        }
-
-        if window?.isVisible == false {
-            window?.orderFront(nil)
-        }
-    }
-
-    func hide() {
-        Self.currentSuggestion = nil
-        viewModel.isVisible = false
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            if !self.viewModel.isVisible {
-                self.window?.orderOut(nil)
-            }
-        }
-    }
-}
-
-// MARK: - ViewModel
-
-class GhostOverlayViewModel: ObservableObject {
+final class GhostOverlayViewModel: ObservableObject {
     @Published var suggestion: String = ""
-    @Published var isVisible: Bool = false
-}
-
-// MARK: - GhostOverlayView
-
-struct GhostOverlayView: View {
-    @ObservedObject var viewModel: GhostOverlayViewModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                if !viewModel.suggestion.isEmpty {
-                    Text(viewModel.suggestion)
-                        .font(.system(size: 13, weight: .regular, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.7))
-                        .lineLimit(1)
-
-                    TabBadge()
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.15), lineWidth: 0.5)
-                    )
-            )
-            .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 3)
-            .opacity(viewModel.isVisible ? 1 : 0)
-            .offset(y: viewModel.isVisible ? 0 : 5)
-            .animation(.spring(response: 0.2, dampingFraction: 0.8), value: viewModel.isVisible)
-
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-}
-
-struct TabBadge: View {
-    var body: some View {
-        Text("⇥")
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundColor(.white.opacity(0.5))
-            .padding(.horizontal, 5)
-            .padding(.vertical, 2)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.white.opacity(0.1))
-            )
-    }
-}
-
-// MARK: - FABWindowController (Mode B — floating action button on selection)
-
-@MainActor
-final class FABWindowController {
-    private var window: NSWindow?
-    private var viewModel = FABViewModel()
-
-    init() {
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 300, height: 44),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-
-        let hosting = NSHostingView(rootView: GhostFABView(viewModel: viewModel))
-        win.contentView = hosting
-        win.isOpaque = false
-        win.backgroundColor = .clear
-        win.level = .floating
-        win.ignoresMouseEvents = false   // FAB must receive clicks
-        win.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        win.hasShadow = false
-
-        self.window = win
-    }
-
-    func show(selectedText: String, near rect: CGRect) {
-        viewModel.selectedText = selectedText
-        viewModel.actions = AppSettings.shared.userActions
-
-        let screens = NSScreen.screens
-        let targetScreen = screens.first(where: { $0.frame.contains(rect.origin) }) ?? NSScreen.main ?? screens.first!
-        let screenFrame = targetScreen.frame
-
-        let windowWidth: CGFloat = 300
-        let windowHeight: CGFloat = 44
-
-        // Position FAB just below the end of the selection rect
-        let x = min(rect.maxX, screenFrame.maxX - windowWidth)
-        let yFlipped = screenFrame.maxY - rect.maxY - 8   // 8pt gap below selection
-
-        let frame = CGRect(
-            x: max(x, screenFrame.minX),
-            y: yFlipped - windowHeight,
-            width: windowWidth,
-            height: windowHeight
-        )
-
-        viewModel.isVisible = true
-
-        if window?.frame != frame {
-            window?.setFrame(frame, display: true)
-        }
-
-        if window?.isVisible == false {
-            window?.orderFront(nil)
-        }
-    }
-
-    func hide() {
-        viewModel.isVisible = false
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            if !self.viewModel.isVisible {
-                self.window?.orderOut(nil)
-            }
-        }
-    }
-}
-
-// MARK: - FABViewModel
-
-class FABViewModel: ObservableObject {
     @Published var selectedText: String = ""
-    @Published var actions: [UserAction] = AppSettings.shared.userActions
-    @Published var isVisible: Bool = false
     @Published var isProcessing: Bool = false
     @Published var resultText: String? = nil
 }
 
-// MARK: - GhostFABView
-
-struct GhostFABView: View {
-    @ObservedObject var viewModel: FABViewModel
-
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(viewModel.actions.prefix(4)) { action in
-                FABActionButton(action: action, viewModel: viewModel)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.15), lineWidth: 0.5)
-                )
+// MARK: - Overlay Window Controller
+@MainActor
+final class OverlayWindowController {
+    static var currentSuggestion: String?
+    
+    private var window: NSWindow?
+    private let viewModel = GhostOverlayViewModel()
+    
+    init() {
+        // We use a larger initial frame but a clear background.
+        // The window will only "exist" where the SwiftUI content is opaque.
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 280, height: 450),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
         )
-        .shadow(color: .black.opacity(0.3), radius: 10, x: 0, y: 4)
-        .opacity(viewModel.isVisible ? 1 : 0)
-        .scaleEffect(viewModel.isVisible ? 1 : 0.92)
-        .animation(.spring(response: 0.22, dampingFraction: 0.78), value: viewModel.isVisible)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        
+        let hosting = NSHostingView(rootView: GhostOverlayView(viewModel: viewModel))
+        win.contentView = hosting
+        win.isOpaque = false
+        win.backgroundColor = .clear
+        win.level = .floating // Above almost everything
+        win.hasShadow = true
+        win.ignoresMouseEvents = false // Must be false to allow button clicks
+        win.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        
+        self.window = win
+    }
+    
+    func show(suggestion: String, selectedText: String, near cgRect: CGRect) {
+    Self.currentSuggestion = suggestion
+    viewModel.suggestion   = suggestion
+    viewModel.selectedText = selectedText
+
+    guard let window = window,
+          let primaryScreen = NSScreen.screens.first else { return }
+
+    let primaryHeight = primaryScreen.frame.height
+    let windowHeight: CGFloat = 450
+
+    // CG → Cocoa Y-flip:
+    // cgRect.minY is pixels from top of primary screen (Y-down).
+    // Cocoa y of that same edge = primaryHeight - cgRect.minY.
+    // Place overlay so its bottom aligns just above the selection's top edge.
+    let x = cgRect.minX
+    let y = (primaryHeight - cgRect.minY) - windowHeight - 10
+
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    window.setFrame(NSRect(x: x, y: y, width: 280, height: windowHeight), display: false)
+    CATransaction.commit()
+
+    // orderFront — not makeKeyAndOrderFront — preserves focus in host text field.
+    window.orderFront(nil)
+}
+    
+    func hide() {
+        window?.orderOut(nil)
     }
 }
 
-// MARK: - FABActionButton
-
-struct FABActionButton: View {
-    let action: UserAction
-    @ObservedObject var viewModel: FABViewModel
-    @State private var isHovered = false
-
+// MARK: - Main View
+struct GhostOverlayView: View {
+    @ObservedObject var viewModel: GhostOverlayViewModel
+    
     var body: some View {
-        Button {
-            runAction()
-        } label: {
+        VStack(alignment: .leading, spacing: 6) {
+            // Section 1: The "Ghost" Suggestion / Caret
             HStack(spacing: 4) {
-                if viewModel.isProcessing {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .frame(width: 12, height: 12)
-                } else {
-                    Image(systemName: action.sfSymbol)
-                        .font(.system(size: 11, weight: .medium))
-                }
-                Text(action.title)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
+                Text("⎸").foregroundColor(.blue).bold()
+                Text(viewModel.suggestion)
+                    .foregroundColor(.secondary)
+                    .italic()
             }
-            .foregroundColor(isHovered ? .primary : .secondary)
             .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(isHovered ? Color.white.opacity(0.15) : Color.clear)
-            )
+            .padding(.vertical, 4)
+            .background(Color.black.opacity(0.2))
+            .cornerRadius(4)
+            
+            // Section 2: The Action List (The FAB)
+            if !viewModel.selectedText.isEmpty {
+                VStack(spacing: 0) {
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            ForEach(UserAction.defaults) { action in
+                                ActionButton(action: action, viewModel: viewModel)
+                            }
+                        }
+                        .padding(4)
+                    }
+                }
+               // .frame(width: 200, maxHeight: 280) // Prevents truncation
+                .frame(width: 200)
+                .frame(maxHeight: 280)
+                .background(VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow))
+                .cornerRadius(10)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                )
+                .shadow(radius: 15)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .padding(10)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: viewModel.selectedText)
+    }
+}
+
+// MARK: - Subviews
+struct ActionButton: View {
+    let action: UserAction
+    @ObservedObject var viewModel: GhostOverlayViewModel
+    @State private var isHovered = false
+    
+    var body: some View {
+        Button(action: runAction) {
+            HStack(spacing: 8) {
+                Image(systemName: action.iconName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 16)
+                
+                Text(action.title)
+                    .font(.system(size: 12, weight: .medium))
+                
+                Spacer()
+                
+                if let shortcut = action.shortcut {
+                    Text(shortcut.uppercased())
+                        .font(.system(size: 9, weight: .bold))
+                        .padding(.horizontal, 4)
+                        .background(Color.white.opacity(0.1))
+                        .cornerRadius(3)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .background(isHovered ? Color.blue.opacity(0.8) : Color.clear)
+            .foregroundColor(isHovered ? .white : .primary)
+            .cornerRadius(6)
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
         .disabled(viewModel.isProcessing)
     }
-
+    
     private func runAction() {
-        guard !viewModel.isProcessing, !viewModel.selectedText.isEmpty else { return }
+        guard !viewModel.isProcessing else { return }
         viewModel.isProcessing = true
+        
         Task {
             let result = await InferenceManager.shared.transform(
                 selectedText: viewModel.selectedText,
                 action: action
             )
+            
             await MainActor.run {
                 viewModel.isProcessing = false
-                viewModel.resultText = result
-                // Post so AppDelegate can inject the result
-                NotificationCenter.default.post(
-                    name: .fabActionCompleted,
-                    object: result
-                )
+                if let finalResult = result {
+                    // CRITICAL: Hide our app so focus returns to the original text field
+                    NSApp.hide(nil)
+                    
+                    // Small delay to ensure the OS completes the focus switch
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        AccessibilityObserver.shared.injectTransformResult(finalResult)
+                    }
+                }
             }
         }
     }
 }
 
-// MARK: - Notification name
+// MARK: - Helpers
+struct VisualEffectView: NSViewRepresentable {
+    let material: NSVisualEffectView.Material
+    let blendingMode: NSVisualEffectView.BlendingMode
+    
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = blendingMode
+        view.state = .active
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+}
 
 extension Notification.Name {
     static let fabActionCompleted = Notification.Name("com.luminatext.fabActionCompleted")
