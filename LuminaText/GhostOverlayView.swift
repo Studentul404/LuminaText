@@ -20,8 +20,6 @@ final class OverlayWindowController {
     private var panel: NSPanel?
     private let viewModel = GhostOverlayViewModel()
 
-    // Fixed dimensions — NSHostingView must never negotiate size with the window.
-    // Variable-height content (the FAB action list) lives in FABWindowController.
     private let panelWidth:  CGFloat = 320
     private let panelHeight: CGFloat = 36
 
@@ -30,66 +28,59 @@ final class OverlayWindowController {
             contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
             styleMask: [
                 .borderless,
-                .nonactivatingPanel   // NSPanel-only flag — valid here, was invalid on NSWindow
+                .nonactivatingPanel
             ],
             backing: .buffered,
-            defer: false              // false: backing store created immediately, no deferred layout surprises
+            defer: false
         )
 
-        panel.isOpaque          = false
-        panel.backgroundColor   = .clear
-        panel.hasShadow         = false
-        panel.level             = .floating
-        panel.ignoresMouseEvents = true   // ghost text is display-only; Tab is handled via CGEvent tap
+        panel.isOpaque           = false
+        panel.backgroundColor    = .clear
+        panel.hasShadow          = false
+        panel.level              = .floating
+        panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         panel.animationBehavior  = .none
 
+        // FIX: Single assignment of contentView — never assign twice.
+        // NSHostingView must NOT have external NSLayoutConstraints added to it
+        // when it lives inside an NSPanel: the panel owns the frame, and adding
+        // constraints triggers a deferred layout pass (_postWindowNeedsUpdateConstraints)
+        // that races with NSPanel internals and causes SIGSEGV.
         let hosting = NSHostingView(rootView: GhostOverlayView(viewModel: viewModel))
         hosting.frame = NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight)
+
+        // sizingOptions = [] tells NSHostingView not to negotiate its size with
+        // the window, which prevents the unsolicited layout pass that crashes.
         if #available(macOS 13.0, *) {
             hosting.sizingOptions = []
         }
-        panel.contentView = hosting
-                panel.contentView = hosting
-                NSLayoutConstraint.activate([
-                    hosting.widthAnchor.constraint(equalToConstant: panelWidth),
-                    hosting.heightAnchor.constraint(equalToConstant: panelHeight),
-                ])
 
-                self.panel = panel
+        panel.contentView = hosting  // single assignment — no duplicate below
+        self.panel = panel
     }
 
     // MARK: - Show
 
-    /// `cgRect` is in CG global space (Y-down, origin = top-left of primary screen).
     func show(suggestion: String, near cgRect: CGRect) {
-        Self.currentSuggestion  = suggestion
-        viewModel.suggestion    = suggestion
+        Self.currentSuggestion = suggestion
+        viewModel.suggestion   = suggestion
 
         guard let panel = panel,
               let primaryScreen = NSScreen.screens.first else { return }
 
         let primaryHeight = primaryScreen.frame.height
-
-        // CG → Cocoa Y-flip:
-        // Cocoa y of the selection's top edge = primaryHeight - cgRect.minY
-        // Place the ghost text pill so its bottom sits just above the selection.
         let x = cgRect.minX
-        let y = (primaryHeight - cgRect.minY) + 4   // 4pt gap above the text baseline
+        let y = (primaryHeight - cgRect.minY) + 4
 
-        // Zero-tearing: suppress implicit CA position animation
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        // display: false — never force a synchronous display inside show().
-        // Triggering display:true during an AppKit layout pass is what causes
-        // _postWindowNeedsUpdateConstraints to throw (frames 3-5 in the crash log).
         panel.setFrame(
             NSRect(x: x, y: y, width: panelWidth, height: panelHeight),
             display: false
         )
         CATransaction.commit()
 
-        // orderFront, not makeKeyAndOrderFront — preserves key window in host app.
         if !panel.isVisible {
             panel.orderFront(nil)
         }
@@ -105,7 +96,6 @@ final class OverlayWindowController {
 }
 
 // MARK: - Ghost Text View
-// Intentionally minimal — fixed height, no conditional branches that change layout.
 
 struct GhostOverlayView: View {
     @ObservedObject var viewModel: GhostOverlayViewModel
@@ -147,7 +137,7 @@ struct GhostOverlayView: View {
     }
 }
 
-// MARK: - VisualEffectView (kept for FABWindowController use)
+// MARK: - VisualEffectView
 
 struct VisualEffectView: NSViewRepresentable {
     let material: NSVisualEffectView.Material
@@ -155,9 +145,9 @@ struct VisualEffectView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
-        view.material    = material
+        view.material     = material
         view.blendingMode = blendingMode
-        view.state       = .active
+        view.state        = .active
         return view
     }
 

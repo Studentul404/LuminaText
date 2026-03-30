@@ -140,6 +140,13 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(excludedBundleIDs, forKey: "excludedBundleIDs") }
     }
 
+    @Published var excludedApps: Set<String> = [] {
+    didSet {
+        let array = Array(excludedApps)
+        defaults.set(array, forKey: "excludedApps")
+    }
+}
+
     // MARK: Enums & Complex Objects
     @Published var inferenceMode:        InferenceMode { didSet { saveJSON("inferenceMode",        inferenceMode)        } }
     @Published var transformMode:        TransformMode { didSet { saveJSON("transformMode",        transformMode)        } }
@@ -178,6 +185,7 @@ final class AppSettings: ObservableObject {
         acceptHotkey        = AppSettings.loadJSON("acceptHotkey")        ?? .defaultAccept
         dismissHotkey       = AppSettings.loadJSON("dismissHotkey")       ?? .defaultDismiss
         manualTriggerHotkey = AppSettings.loadJSON("manualTriggerHotkey") ?? .defaultTrigger
+        excludedApps        = Set(d.stringArray(forKey: "excludedApps") ?? [])
     }
 
     // MARK: - Template Rendering

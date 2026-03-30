@@ -440,106 +440,101 @@ struct NewActionSheet: View {
 
 // MARK: - Exclusions Tab
 
+import SwiftUI
+
 struct ExclusionsTab: View {
-    @ObservedObject private var s = AppSettings.shared
-    @State private var selectedBundleID: String? = nil
-    @State private var showAddSheet = false
-    @State private var manualBundleID = ""
-
+    @ObservedObject var settings = AppSettings.shared
+    
     var body: some View {
-        VStack(spacing: 0) {
-            List(s.excludedBundleIDs, id: \.self, selection: $selectedBundleID) { bundleID in
-                HStack(spacing: 10) {
-                    appIcon(for: bundleID)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(appName(for: bundleID)).fontWeight(.medium)
-                        Text(bundleID).font(.caption).foregroundColor(.secondary)
-                    }
-                }
-                .padding(.vertical, 2)
-            }
-            .listStyle(.sidebar)
-            .overlay {
-                if s.excludedBundleIDs.isEmpty {
-                    VStack(spacing: 8) {
-                        Image(systemName: "nosign").font(.system(size: 32)).foregroundColor(.secondary)
-                        Text("No excluded apps").foregroundColor(.secondary)
-                        Text("Completions are active in all apps.")
-                            .font(.caption).foregroundColor(.secondary)
-                    }
-                }
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Исключенные приложения")
+                    .font(.headline)
+                Text("LuminaText не будет активен в выбранных программах.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
             }
 
-            Divider()
-
-            HStack(spacing: 0) {
-                // Add current frontmost app
-                Button {
-                    if let app = NSWorkspace.shared.frontmostApplication,
-                       let bid = app.bundleIdentifier,
-                       bid != Bundle.main.bundleIdentifier {
-                        s.addExclusion(bid)
+            List {
+                ForEach(Array(settings.excludedApps).sorted(), id: \.self) { bid in
+                    HStack {
+                        AppIconView(bundleID: bid)
+                        
+                        VStack(alignment: .leading) {
+                            Text(getAppName(bid))
+                                .font(.body)
+                            Text(bid)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Spacer()
+                        
+                        Button(action: { settings.excludedApps.remove(bid) }) {
+                            Image(systemName: "minus.circle")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
                     }
-                } label: {
-                    Image(systemName: "plus").frame(width: 28, height: 24)
+                    .padding(.vertical, 4)
                 }
-                .buttonStyle(.plain)
-                .help("Exclude the currently active app")
-
-                Button {
-                    guard let id = selectedBundleID else { return }
-                    s.removeExclusion(id)
-                    selectedBundleID = nil
-                } label: {
-                    Image(systemName: "minus").frame(width: 28, height: 24)
+            }
+            .listStyle(.inset(alternatesRowBackgrounds: true))
+            .overlay(Group {
+                if settings.excludedApps.isEmpty {
+                    Text("Список пуст").foregroundColor(.secondary)
                 }
-                .buttonStyle(.plain)
-                .disabled(selectedBundleID == nil)
+            })
 
+            HStack {
+                Button(action: addApplication) {
+                    Label("Добавить приложение", systemImage: "plus")
+                }
                 Spacer()
-
-                Button("Add by ID…") { showAddSheet = true }
-                    .buttonStyle(.plain).font(.system(size: 11)).foregroundColor(.secondary).padding(.trailing, 8)
-            }
-            .padding(.vertical, 4).padding(.horizontal, 4)
-            .background(Color(.controlBackgroundColor))
-        }
-        .sheet(isPresented: $showAddSheet) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Add App by Bundle ID").font(.headline)
-                TextField("com.example.app", text: $manualBundleID)
-                    .textFieldStyle(.roundedBorder)
-                HStack {
-                    Spacer()
-                    Button("Cancel") { showAddSheet = false; manualBundleID = "" }
-                        .keyboardShortcut(.cancelAction)
-                    Button("Add") {
-                        s.addExclusion(manualBundleID.trimmingCharacters(in: .whitespaces))
-                        showAddSheet = false; manualBundleID = ""
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(manualBundleID.trimmingCharacters(in: .whitespaces).isEmpty)
+                if !settings.excludedApps.isEmpty {
+                    Button("Очистить всё") { settings.excludedApps.removeAll() }
+                        .controlSize(.small)
                 }
             }
-            .padding(20)
-            .frame(width: 340)
+        }
+        .padding()
+    }
+
+    private func addApplication() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.application]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        
+        if panel.runModal() == .OK {
+            for url in panel.urls {
+                if let bundle = Bundle(url: url), let bid = bundle.bundleIdentifier {
+                    settings.excludedApps.insert(bid)
+                }
+            }
         }
     }
 
-    private func appName(for bundleID: String) -> String {
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+    private func getAppName(_ bid: String) -> String {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bid) {
             return url.deletingPathExtension().lastPathComponent
         }
-        return bundleID
+        return bid
     }
+}
 
-    @ViewBuilder
-    private func appIcon(for bundleID: String) -> some View {
+struct AppIconView: View {
+    let bundleID: String
+    var body: some View {
         if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
             Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
-                .resizable().frame(width: 20, height: 20)
+                .resizable()
+                .frame(width: 24, height: 24)
         } else {
-            Image(systemName: "app.dashed").frame(width: 20, height: 20).foregroundColor(.secondary)
+            Image(systemName: "app.dashed")
+                .resizable()
+                .frame(width: 24, height: 24)
+                .foregroundColor(.secondary)
         }
     }
 }
